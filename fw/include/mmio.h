@@ -16,13 +16,18 @@
 uint32_t mmio_read32(uint32_t addr);
 void mmio_write32(uint32_t addr, uint32_t value);
 #else
+/* The empty asm hides constant addresses from GCC's -Warray-bounds, which
+ * treats any constant below 4 KiB (all of our SRAM) as a null-pointer
+ * dereference. It emits no instructions. */
 static inline uint32_t mmio_read32(uint32_t addr)
 {
+    __asm__("" : "+r"(addr));
     return *(volatile uint32_t *)(uintptr_t)addr;
 }
 
 static inline void mmio_write32(uint32_t addr, uint32_t value)
 {
+    __asm__("" : "+r"(addr));
     *(volatile uint32_t *)(uintptr_t)addr = value;
 }
 #endif

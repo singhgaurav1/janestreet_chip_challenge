@@ -10,6 +10,7 @@
 #include "irq.h"
 #include "mmio.h"
 #include "platform.h"
+#include "sysctrl.h"
 
 extern uint32_t __stack_limit[];
 
@@ -49,6 +50,13 @@ int main(void)
     /* Runs until the testbench pulses reset without reloading the image. */
     for (;;)
         fw_heartbeat();
+#elif VARIANT == V_pinpanic
+    /* Chip only: drive every sysctrl pin, then panic. The safe state must
+     * release them (testbench checks uio_oe == 0, uo_out[6:0] == 0). */
+    sysctrl_gpio_out(0x7F);
+    sysctrl_uio_out(0xFF);
+    sysctrl_uio_oe(0xFF);
+    fw_panic(FW_PANIC_USER, 0x9100);
 #else
 #error unknown VARIANT
 #endif

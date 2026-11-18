@@ -22,6 +22,21 @@
 
 #define TESTNUM gp
 
+#ifdef RVTEST_CHIP
+/* Full chip: no debug device. Fail code = (mcause << 7) | testnum-bits;
+ * tohost = (mcause << 8) | 1, so mcause = code >> 7. */
+#define UNEXPECTED_TRAP                                                 \
+        csrr t5, mcause; slli TESTNUM, t5, 8; ori TESTNUM, TESTNUM, 1;
+#else
+/* Standalone testbench: print mcause, mepc, mtval on its debug device. */
+#define UNEXPECTED_TRAP                                                 \
+        li t6, 0x20000024;                                              \
+        csrr t5, mcause; sw t5, 0(t6);                                  \
+        csrr t5, mepc;   sw t5, 0(t6);                                  \
+        csrr t5, mtval;  sw t5, 0(t6);                                  \
+        ori TESTNUM, TESTNUM, 1337;
+#endif
+
 #define INIT_XREG                                                       \
   li x1, 0;  li x2, 0;  li x3, 0;  li x4, 0;  li x5, 0;  li x6, 0;      \
   li x7, 0;  li x8, 0;  li x9, 0;  li x10, 0; li x11, 0; li x12, 0;     \
@@ -56,12 +71,7 @@ trap_vector:                                                            \
         la t5, mtvec_handler;                                           \
         beqz t5, 1f;                                                    \
         jr t5;                                                          \
-  1:    /* unexpected trap: report mcause, mepc, mtval, then fail */    \
-        li t6, 0x20000024;                                              \
-        csrr t5, mcause; sw t5, 0(t6);                                  \
-        csrr t5, mepc;   sw t5, 0(t6);                                  \
-        csrr t5, mtval;  sw t5, 0(t6);                                  \
-        ori TESTNUM, TESTNUM, 1337;                                     \
+  1:    UNEXPECTED_TRAP                                                 \
   write_tohost:                                                         \
         sw TESTNUM, tohost, t5;                                         \
         j write_tohost;                                                 \

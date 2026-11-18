@@ -1,0 +1,1 @@
+chiptest_TARGETS := chip

@@ -26,7 +26,9 @@ ROOT = Path(__file__).resolve().parents[2]
 RT = ROOT / "deps" / "riscv-tests"
 ENV = Path(__file__).resolve().parent / "env"
 TBS = {"conv": ROOT / "test" / "fw" / "obj" / "Vtb",      # src/ibex_small.v
-       "ref": ROOT / "test" / "fw" / "obj" / "Vtb_ref"}  # upstream SV (differential)
+       "ref": ROOT / "test" / "fw" / "obj" / "Vtb_ref",  # upstream SV (differential)
+       "chip": ROOT / "test" / "fw" / "obj" / "Vtb_chip"}  # full chip, loaded over SPI
+CHIP_RAM = 2048
 OUT = ROOT / "fw" / "build" / "riscv-tests"
 CC = os.environ.get("RISCV_CC", "riscv64-unknown-elf-gcc")
 OBJCOPY = os.environ.get("RISCV_OBJCOPY", "riscv64-unknown-elf-objcopy")
@@ -54,27 +56,43 @@ def suite_tests(suite: str) -> list[str]:
     return [t for t in m.group(1).replace("\\", " ").split() if t]
 
 
-def build(suite: str, test: str) -> Path:
+def build(suite: str, test: str, chip: bool = False) -> tuple[Path, int]:
+    """Build one test; returns (hex image, image bytes). The standalone
+    testbenches share one image; the chip build uses link_chip.ld (2 KiB SRAM,
+    tohost = sysctrl SCRATCH) and raises OverflowError if it does not fit."""
     src = RT / "isa" / suite / f"{test}.S"
-    out = OUT / f"{suite}-{test}"  # shared by both testbenches (same image)
-    elf, hexf = out.with_suffix(".elf"), out.with_suffix(".hex")
-    subprocess.run([CC, f"-march={MARCH[suite]}", "-mabi=ilp32", "-static", "-mcmodel=medany",
-                    "-fvisibility=hidden", "-nostdlib", "-nostartfiles",
-                    "-I", str(ENV), "-I", str(RT / "env"), "-I", str(RT / "isa" / "macros" / "scalar"),
-                    "-T", str(ENV / "link.ld"), str(src), "-o", str(elf)], check=True)
-    subprocess.run([OBJCOPY, "-O", "verilog", "-j", ".text.init", "-j", ".text", "-j", ".data",
-                    str(elf), str(hexf)], check=True)
-    return hexf
+    out = OUT / (f"{suite}-{test}" + ("-chip" if chip else ""))
+    elf, hexf, binf = out.with_suffix(".elf"), out.with_suffix(".hex"), out.with_suffix(".bin")
+    link = ENV / ("link_chip.ld" if chip else "link.ld")
+    r = subprocess.run([CC, f"-march={MARCH[suite]}", "-mabi=ilp32", "-static", "-mcmodel=medany",
+                        "-fvisibility=hidden", "-nostdlib", "-nostartfiles",
+                        "-Wl,--no-warn-rwx-segments"] + (["-DRVTEST_CHIP"] if chip else []) + [
+                        "-I", str(ENV), "-I", str(RT / "env"), "-I", str(RT / "isa" / "macros" / "scalar"),
+                        "-T", str(link), str(src), "-o", str(elf)], capture_output=True, text=True)
+    if r.returncode != 0:
+        if chip and "overflowed" in r.stderr:
+            raise OverflowError
+        raise subprocess.CalledProcessError(r.returncode, r.args, r.stdout, r.stderr)
+    subprocess.run([OBJCOPY, "-O", "binary", "-j", ".text.init", "-j", ".text", "-j", ".data",
+                    str(elf), str(binf)], check=True)
+    data = binf.read_bytes()
+    lines = ["@00000000"] + [" ".join(f"{b:02X}" for b in data[i:i + 16])
+                             for i in range(0, len(data), 16)]
+    hexf.write_text("\n".join(lines) + "\n")
+    return hexf, len(data)
 
 
 def run(suite: str, test: str, args) -> tuple[str, str, str]:
     name = f"{suite}-{test}"
+    chip = args.tb == "chip"
     try:
-        hexf = build(suite, test)
+        hexf, nbytes = build(suite, test, chip)
+    except OverflowError:
+        return name, "SKIP", f"does not fit the chip's {CHIP_RAM} B SRAM"
     except subprocess.CalledProcessError as e:
-        return name, "BUILD_ERROR", str(e)
-    cmd = [str(TBS[args.tb]), f"+img={hexf}", f"+stall={args.stall}", f"+seed={args.seed}",
-           "+max_cycles=200000",
+        return name, "BUILD_ERROR", str(e) + e.stderr
+    cmd = [str(TBS[args.tb]), f"+img={hexf}", f"+img_len={nbytes}", f"+stall={args.stall}",
+           f"+seed={args.seed}", "+max_cycles=" + ("600000" if chip else "200000"),
            # randomise all uninitialised state (built with --x-initial unique)
            "+verilator+rand+reset+2", f"+verilator+seed+{args.seed}"] + (["+single_port"] if args.single_port else [])
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -95,11 +113,13 @@ def run_suite(jobs, args) -> tuple[int, list[tuple[str, str, str]]]:
             ok = status == "FAIL"
             tag = "XFAIL" if ok else "XPASS?"
         else:
-            ok = status == "PASS"
+            ok = status in ("PASS", "SKIP")
             tag = status
         bad += not ok
         lines.append(f"{tag:12s} {name:28s} {detail}" + (f"  [expected: {exp}]" if exp else ""))
-    summary = (f"{len(results) - bad}/{len(results)} as expected "
+    skipped = sum(r[1] == "SKIP" for r in results)
+    summary = (f"{len(results) - bad}/{len(results)} as expected"
+               + (f", {skipped} skipped (too big)" if skipped else "") + " "
                f"(tb={args.tb} stall={args.stall}% seed={args.seed} single_port={int(args.single_port)})")
     (OUT / f"results.{args.tb}.txt").write_text("\n".join(lines + [summary]) + "\n")
     print("\n".join(lines))
@@ -112,14 +132,15 @@ def main() -> int:
     ap.add_argument("--suite", default="rv32ui,rv32um,rv32uc,rv32mi")
     ap.add_argument("--tb", choices=sorted(TBS) + ["both"], default="conv",
                     help="conv: converted src/ibex_small.v; ref: upstream SystemVerilog; "
-                         "both: run both and require identical results and cycle counts")
+                         "both: run both and require identical results and cycle counts; "
+                         "chip: full chip, each test loaded over the host SPI pins")
     ap.add_argument("--stall", type=int, default=0)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--single-port", action="store_true")
     ap.add_argument("-j", type=int, default=os.cpu_count() or 4)
     ap.add_argument("tests", nargs="*", help="suite-test names, e.g. rv32ui-add")
     args = ap.parse_args()
-    tbs = sorted(TBS) if args.tb == "both" else [args.tb]
+    tbs = ["conv", "ref"] if args.tb == "both" else [args.tb]
     for t in tbs:
         if not TBS[t].exists():
             raise SystemExit(f"{TBS[t]} missing: run test/fw/build_tb.sh {t}")

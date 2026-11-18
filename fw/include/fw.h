@@ -19,7 +19,7 @@
 #define FW_IMAGE_MAGIC   0x57464550u  /* "PEFW" little-endian */
 #define FW_IMAGE_HDR_OFF 0x84u
 #define FW_STATUS_MAGIC  0x53544657u  /* "WFTS" */
-#define FW_SIM_EXIT_PANIC_BASE 1000u  /* testbench exit code = base + reason */
+#define FW_EXIT_PANIC_BASE 1000u  /* result code for a panic = base + reason */
 
 #ifndef __ASSEMBLER__
 #include <stdint.h>
@@ -71,7 +71,7 @@ typedef struct {
 extern volatile fw_status_t fw_status;
 
 /* Stop: put the hardware in its safe state, record why, halt forever.
- * In simulation builds the testbench is also told (exit code 1000+reason). */
+ * The result code 1000+reason goes to the host mailbox (platform.h). */
 __attribute__((noreturn)) void fw_panic(uint32_t reason, uint32_t detail);
 
 /* Normal end of a program (main returning calls this). code 0 = success.
@@ -89,6 +89,10 @@ static inline void fw_heartbeat(void) { fw_status.heartbeat++; }
  * fw_panic and fw_exit with interrupts disabled. The PE HAL provides it
  * (engines off, pads released); the default does nothing. */
 void fw_safe_state(void);
+
+/* Pins outside the PE block (sysctrl GPIO on the chip; nothing in FW_SIM
+ * builds, where the testbench has no sysctrl). Called by fw_safe_state(). */
+void fw_platform_safe_state(void);
 
 #define FW_ASSERT(c) do { if (!(c)) fw_panic(FW_PANIC_ASSERT, __LINE__); } while (0)
 

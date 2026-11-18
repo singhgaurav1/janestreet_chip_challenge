@@ -99,3 +99,6 @@ int mock_last_write(uint32_t addr, uint32_t *value)
         }
     return -1;
 }
+
+/* Runtime hook called by the HAL's fw_safe_state(); not under test here. */
+void fw_platform_safe_state(void) {}

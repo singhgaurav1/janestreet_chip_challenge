@@ -1,15 +1,32 @@
 # Firmware build. Targets:
-#   make                     all apps for ARCH (default rv32imc)
+#   make                     all apps for TARGET and ARCH
+#   make TARGET=tb           images for the standalone-Ibex testbench
 #   make ARCH=rv32ec         same for the Ibex "micro" fallback (RV32EC)
 #   make host-test           HAL unit tests on the build machine
-#   make sizes               size report for every app
 #   make clean
-# Variables: RAM_SIZE (bytes, default 4096), SIM=1 (testbench console and
-# pass/fail device; default for the apps here), CROSS (toolchain prefix).
+# Variables:
+#   TARGET   chip (default): the SoC of docs/soc.md, 2 KiB SRAM, results to
+#            sysctrl SCRATCH.  tb: test/fw/tb_ibex_fw.sv, 4 KiB, FW_SIM device.
+#   RAM_SIZE override the target's RAM size (bytes)
+#   CROSS    toolchain prefix
+# Output: build/<arch>_<target>/<app>.{elf,bin,hex,map}. An app builds for the
+# targets in its <app>_TARGETS (apps/<app>/app.mk; default: chip tb).
 
 ARCH     ?= rv32imc
-RAM_SIZE ?= 4096
-SIM      ?= 1
+TARGET   ?= chip
+# Linker floor for the stack. The real bound is computed per image by
+# scripts/stack_check.py (worst-case call depth + interrupt frame + margin),
+# which fails the build if it does not fit.
+STACK_MIN ?= 128
+ifeq ($(TARGET),chip)
+  RAM_SIZE ?= 2048
+  SIM      := 0
+else ifeq ($(TARGET),tb)
+  RAM_SIZE ?= 4096
+  SIM      := 1
+else
+  $(error TARGET must be chip or tb)
+endif
 CROSS    ?= riscv64-unknown-elf-
 CC       := $(CROSS)gcc
 OBJCOPY  := $(CROSS)objcopy
@@ -27,7 +44,7 @@ else
   $(error ARCH must be rv32imc or rv32ec)
 endif
 
-BUILD := build/$(ARCH)_ram$(RAM_SIZE)
+BUILD := build/$(ARCH)_$(TARGET)
 .DEFAULT_GOAL := all
 WARN  := -Wall -Wextra -Werror -Wshadow -Wundef -Wcast-align -Wstrict-prototypes \
          -Wmissing-prototypes -Wconversion -Wno-sign-conversion -Wvla
@@ -39,7 +56,8 @@ ifeq ($(SIM),1)
   CFLAGS += -DFW_SIM
 endif
 LDFLAGS := -march=$(MARCH) -mabi=$(MABI) -nostdlib -nostartfiles -T link/fw.ld \
-           -Wl,--defsym=FW_RAM_SIZE=$(RAM_SIZE) -Wl,--gc-sections \
+           -Wl,--defsym=FW_RAM_SIZE=$(RAM_SIZE) -Wl,--defsym=FW_STACK_MIN=$(STACK_MIN) \
+           -Wl,--gc-sections \
            -Wl,--no-warn-rwx-segments
 LIBS    := -lgcc
 
@@ -62,19 +80,20 @@ $(BUILD)/$(1).elf: $(RT_SRC) $(if $($(2)_HAL),$(HAL_SRC)) $(wildcard apps/$(2)/*
 	  -c $(addprefix $(CURDIR)/,$(RT_SRC) $(if $($(2)_HAL),$(HAL_SRC)) $(wildcard apps/$(2)/*.c) $($(2)_SRC_EXTRA))
 	@$(CC) $(LDFLAGS) -Wl,-Map=$(BUILD)/$(1).map -o $$@ $(BUILD)/obj-$(1)/*.o $(LIBS)
 $(BUILD)/$(1).hex: $(BUILD)/$(1).elf scripts/mkimage.py
+	@$(PYTHON) scripts/stack_check.py --objdump $(CROSS)objdump --nm $(NM) $$< $(BUILD)/obj-$(1)
 	@$(PYTHON) scripts/mkimage.py --objcopy $(OBJCOPY) --nm $(NM) $$< $(BUILD)/$(1)
 IMAGES += $(BUILD)/$(1).hex
 endef
+
+# Apps for this target only
+APPS := $(foreach a,$(APPS),$(if $(filter $(TARGET),$(or $($(a)_TARGETS),chip tb)),$(a)))
 
 $(foreach a,$(APPS),$(if $($(a)_VARIANTS),\
   $(foreach v,$($(a)_VARIANTS),$(eval $(call app_rules,$(a)-$(v),$(a),-DVARIANT=$(v)))),\
   $(eval $(call app_rules,$(a),$(a),))))
 
-.PHONY: all clean host-test sizes
+.PHONY: all clean host-test
 all: $(IMAGES)
-
-sizes: $(IMAGES)
-	@for f in $(IMAGES); do $(PYTHON) scripts/mkimage.py --objcopy $(OBJCOPY) --nm $(NM) $${f%.hex}.elf $${f%.hex} ; done
 
 # ---- Host unit tests (HAL logic and register packing, mock MMIO) ----
 HOST_BUILD := build/host

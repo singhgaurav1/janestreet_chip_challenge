@@ -9,6 +9,7 @@
 #include "mmio.h"
 #include "fw_internal.h"
 #include "platform.h"
+#include "sysctrl.h"
 
 /* Linker-script symbols */
 extern const fw_image_hdr_t fw_image_hdr;
@@ -67,15 +68,21 @@ static void status_begin(fw_state_t state)
     fw_status.state = state;
 }
 
-__attribute__((weak)) void fw_safe_state(void) {}
-
-BOOT_TEXT __attribute__((noreturn)) static void halt(uint32_t sim_code)
+void fw_platform_safe_state(void)
 {
-#ifdef FW_SIM
-    mmio_write32(FW_SIM_TOHOST, sim_code == 0 ? 1u : ((sim_code << 1) | 1u));
-#else
-    (void)sim_code;
+#ifndef FW_SIM
+    sysctrl_safe_state();
 #endif
+}
+
+/* Default when the PE HAL is not linked: only the sysctrl pins (chip). */
+__attribute__((weak)) void fw_safe_state(void) { fw_platform_safe_state(); }
+
+/* Report to the host (platform.h FW_RESULT_REG: sysctrl SCRATCH on the chip,
+ * the testbench's tohost in FW_SIM builds), then sleep forever. */
+BOOT_TEXT __attribute__((noreturn)) static void halt(uint32_t code)
+{
+    mmio_write32(FW_RESULT_REG, code == 0 ? 1u : ((code << 1) | 1u));
     csr_write(mie, 0);
     for (;;)
         __asm__ volatile("wfi");
@@ -89,7 +96,7 @@ __attribute__((noreturn)) static void panic_common(uint32_t reason, uint32_t det
     csr_clear(mstatus, CSR_MSTATUS_MIE);
     csr_write(mie, 0);
     if (fw_status.state == FW_STATE_PANIC)
-        halt(FW_SIM_EXIT_PANIC_BASE + reason);
+        halt(FW_EXIT_PANIC_BASE + reason);
     fw_status.reason = reason;
     fw_status.detail = detail;
     fw_status.ra = ra;
@@ -100,7 +107,7 @@ __attribute__((noreturn)) static void panic_common(uint32_t reason, uint32_t det
     fw_status.magic = FW_STATUS_MAGIC;
     fw_status.state = FW_STATE_PANIC;   /* last: record is complete */
     fw_safe_state();
-    halt(FW_SIM_EXIT_PANIC_BASE + reason);
+    halt(FW_EXIT_PANIC_BASE + reason);
 }
 
 __attribute__((noreturn)) void fw_panic(uint32_t reason, uint32_t detail)
@@ -170,7 +177,7 @@ BOOT_TEXT __attribute__((noreturn)) static void boot_fail(uint32_t reason, uint3
     fw_status.reason = reason;
     fw_status.detail = detail;
     fw_status.state = FW_STATE_PANIC;
-    halt(FW_SIM_EXIT_PANIC_BASE + reason);
+    halt(FW_EXIT_PANIC_BASE + reason);
 }
 
 /* Runs before .bss is zeroed: stack, image and fw_status only. */

@@ -1,15 +1,18 @@
 name: fw
 
-# Firmware workstream (F2): build for Ibex small (rv32imc) and micro (rv32ec),
-# HAL unit tests, riscv-tests on the converted and upstream cores, and the
-# firmware runtime tests on the standalone-Ibex testbench. See fw/README.md.
+# Firmware workstream: build for the chip and the standalone testbench (Ibex
+# small and micro), HAL unit tests, riscv-tests on the converted core, upstream
+# Ibex and the full chip (loaded over the host SPI pins), and the firmware
+# runtime tests on all of them. See fw/README.md.
 on:
   push:
-    paths: ["fw/**", "test/fw/**", "src/ibex_*.v", "docs/pe_isa.md", "tools/peemu/**",
-            "scripts/fetch_deps.sh", ".github/workflows/fw.yaml"]
+    paths: ["fw/**", "test/fw/**", "src/**", "test/Makefile", "test/sram_model/**",
+            "docs/pe_isa.md", "docs/soc.md", "tools/peemu/**", "scripts/fetch_deps.sh",
+            ".github/workflows/fw.yaml"]
   pull_request:
-    paths: ["fw/**", "test/fw/**", "src/ibex_*.v", "docs/pe_isa.md", "tools/peemu/**",
-            "scripts/fetch_deps.sh", ".github/workflows/fw.yaml"]
+    paths: ["fw/**", "test/fw/**", "src/**", "test/Makefile", "test/sram_model/**",
+            "docs/pe_isa.md", "docs/soc.md", "tools/peemu/**", "scripts/fetch_deps.sh",
+            ".github/workflows/fw.yaml"]
   workflow_dispatch:
 
 jobs:
@@ -39,8 +42,9 @@ jobs:
         with:
           name: fw-images-and-logs
           path: |
-            fw/build/*_ram4096/*.bin
-            fw/build/*_ram4096/*.hex
-            fw/build/*_ram4096/*.map
+            fw/build/*_chip/*.bin
+            fw/build/*_chip/*.hex
+            fw/build/*_chip/*.map
+            fw/build/*_tb/*.hex
             fw/build/riscv-tests/results.*.txt
             fw/build/tests/**/*.log

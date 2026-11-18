@@ -469,4 +469,8 @@ void pe_safe_state(void)
 }
 
 /* Strong definition of the runtime hook (weak no-op in runtime.c). */
-void fw_safe_state(void) { pe_safe_state(); }
+void fw_safe_state(void)
+{
+    pe_safe_state();
+    fw_platform_safe_state();
+}

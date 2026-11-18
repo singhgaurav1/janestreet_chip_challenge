@@ -26,8 +26,8 @@
 //   +dump=<addr>     at the end, print 16 words from <addr> (hex) as
 //                    "MEM <addr> <word>" lines (how the host reads the
 //                    firmware status block over the debug bridge)
-//   +pe_stub         accept accesses to 0x1000_0000..0x1000_0FFF (the firmware's
-//                    STUB PE block address) and log them as "PEW/PER <addr>
+//   +pe_stub         accept accesses to 0x1000_1000..0x1000_1FFF (the firmware's
+//                    PE block address, docs/soc.md) and log them as "PEW/PER <addr>
 //                    <data>"; reads return 0. Lets HAL code run here so its
 //                    bus sequence can be checked. NOT a model of the engines.
 //   +reset_at=<n>    pulse rst_n again at cycle n WITHOUT reloading RAM
@@ -210,7 +210,7 @@ module tb_ibex_fw;
       end else if (data_addr[31:8] == SIM_BASE[31:8]) begin
         if (data_we) sim_write(data_addr[7:0], data_wdata, data_be);
         else r.rdata = sim_read(data_addr[7:0]);
-      end else if (pe_stub && data_addr[31:12] == 20'h10000) begin
+      end else if (pe_stub && data_addr[31:12] == 20'h10001) begin
         if (data_we) $display("PEW 0x%08x 0x%08x", data_addr, data_wdata);
         else $display("PER 0x%08x 0x%08x", data_addr, 32'h0);
       end else begin
