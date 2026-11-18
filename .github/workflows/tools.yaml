@@ -1,0 +1,23 @@
+name: tools
+
+on:
+  push:
+    paths: ["tools/**", "examples/**", "docs/pe_isa.md", ".github/workflows/tools.yaml"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  peemu:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r tools/requirements.txt
+      - name: Golden model, assembler and protocol tests
+        run: python -m pytest tools/tests -q
+      - name: Assemble every example
+        run: |
+          cd tools
+          for f in ../examples/pe/*.pe; do python -m peemu asm "$f" -f c > /dev/null; done

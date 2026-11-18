@@ -15,3 +15,7 @@ test/gate_level_netlist.v
 # Local dependencies and synthesis outputs
 deps/
 syn/**/out/
+
+# Python
+__pycache__/
+.pytest_cache/

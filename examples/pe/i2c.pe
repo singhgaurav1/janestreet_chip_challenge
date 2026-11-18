@@ -1,0 +1,90 @@
+; I2C on open-drain pads (pad OD mode: writing 1 releases the line).
+
+.program i2c_ctrl
+; Controller. One TX FIFO word per byte, MSB first:
+;   [31] START before the byte, [30] STOP after it,
+;   [29:22] data (0xFF to read), [21] ACK bit to send (1 = release/NACK).
+; Each byte pushes 9 received bits to the RX FIFO: data << 1 | ack.
+; Pins: out_base = set_base = in_base = SDA, side_base = jmp_pin = SCL.
+; TIMEOUT bounds clock stretching. 8 ticks per bit, SCL low 5 / high 3:
+; clkdiv = f_sys / (8 * f_scl); at 400 kHz that is 1.56 us low, 0.94 us high
+; (Fast-mode minimums: 1.3 / 0.6 us).
+.side_set 1 opt
+.config out_shift_right 0
+.config in_shift_right 0
+.config out_count 1
+.config set_count 1
+top:
+.wrap_target
+    pull                          ; idle: both lines released
+    out x, 1                      ; START flag
+    jmp !x, bits
+    set pins, 1        side 0 [4] ; repeated-START safe: SDA up while SCL low
+    nop                side 1 [1] ; release SCL
+    wait 1 jmppin                 ; honour clock stretching
+    set pins, 0             [1]   ; START: SDA falls while SCL high
+bits:
+    out y, 1                      ; STOP flag
+    set x, 8           side 0     ; 8 data bits + ACK; SCL low (full tLOW)
+bitloop:
+    out pins, 1        side 0 [3] ; SDA = bit while SCL low
+    nop                side 1     ; release SCL
+    wait 1 jmppin                 ; clock stretching
+    in pins, 1                    ; sample SDA while SCL high
+    jmp x--, bitloop   side 0
+    push               side 0     ; byte + ACK to the CPU, SCL held low
+    jmp !y, top
+    set pins, 0             [1]   ; SDA low while SCL low
+    nop                side 1 [1] ; release SCL
+    wait 1 jmppin
+    set pins, 1             [1]   ; STOP: SDA rises while SCL high
+.wrap
+
+
+.program i2c_target
+; Write-only target. Y = (7-bit address << 1); the loader forces
+; "set y" / "mov y" or the CPU pre-loads Y. ACKs its address and every data
+; byte; each data byte is pushed (bits [7:0]).
+; STOP is detected by TIMEOUT: after a STOP, SCL stays high, so the
+; "wait 0 jmppin" in the data loop times out and the engine resynchronises.
+; Limit: the bus-free time after a STOP must exceed TIMEOUT. A full target
+; would watch START/STOP on a second engine and signal through event flags.
+; Pins: in_base = SDA, set_base = SDA, jmp_pin = SCL.
+; Tick >= 8x the SCL rate; TIMEOUT > the longest SCL-high time.
+.config in_shift_right 0
+.config set_count 1
+idle:
+    wait 0 pin 0                  ; SDA falls...
+    jmp t, idle                   ; (timed out: keep watching)
+    jmp pin, start                ; ...while SCL is high: START
+    wait 1 pin 0
+    jmp idle
+start:
+    set x, 7
+    mov isr, null
+abit:
+    wait 0 jmppin
+    jmp t, idle                   ; SCL stuck high: STOP or abort
+    wait 1 jmppin
+    in pins, 1                    ; sample on SCL high
+    jmp x--, abit
+    match isr, 8                  ; address + W bit == Y ?
+    jmp t, ack
+    jmp idle                      ; not us (or a read): NACK by silence
+ack:
+    wait 0 jmppin                 ; SCL low after the 8th bit
+    set pins, 0                   ; ACK
+    wait 1 jmppin                 ; 9th clock
+    wait 0 jmppin
+    set pins, 1                   ; release SDA
+    set x, 7
+    mov isr, null
+dbit:
+    wait 1 jmppin
+    jmp t, idle
+    in pins, 1
+    wait 0 jmppin
+    jmp t, idle                   ; SCL stayed high: STOP
+    jmp x--, dbit
+    push noblock
+    jmp ack

@@ -1,0 +1,39 @@
+; UART 8N1, LSB first. Both programs are pin-agnostic: the loader sets the pins.
+
+.program uart_tx
+; 8 ticks per bit: clkdiv = f_sys / (8 * baud).
+; Pins: out_base = side_base = TX.
+.side_set 1 opt
+.config out_shift_right 1
+.config out_count 1
+    pull            side 1 [7]  ; stop bit / idle high while waiting for data
+    set x, 7        side 0 [7]  ; start bit
+bitloop:
+    out pins, 1                 ; data bit
+    jmp x--, bitloop       [6]  ; 8 ticks per bit
+
+
+.program uart_rx
+; 8 ticks per bit: clkdiv = f_sys / (8 * baud). Pins: in_base = jmp_pin = RX.
+; Loader config: sync_edge fall, autosync 1, sync_phase 0.
+; Clock recovery: "sync" arms a hard sync during the stop bit, so the start
+; edge puts tick 0 one cycle after it is seen; every later falling edge
+; re-phases the grid (autosync) without losing ticks. Bytes appear in RX
+; FIFO bits [31:24]. A framing error sets event flag 4+engine.
+.config in_shift_right 1
+.config autopush 1
+.config push_thresh 8
+.config autosync 1
+.config sync_edge fall
+.wrap_target
+start:
+    sync                    ; arm hard sync for the next start edge
+    wait 0 jmppin           ; tick 0 of the start bit
+    set x, 7           [10] ; to the middle of bit 0 (tick 12)
+bitloop:
+    in pins, 1          [6] ; mid-bit sample (autopush after 8)
+    jmp x--, bitloop        ; 8 ticks per bit
+    jmp pin, start          ; middle of the stop bit: good
+    evt set 4 rel           ; framing error
+    wait 1 jmppin           ; wait for the line to idle
+.wrap

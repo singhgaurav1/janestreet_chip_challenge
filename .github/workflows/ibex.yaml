@@ -1,0 +1,39 @@
+name: ibex
+
+# Checks that src/ibex_small.v is exactly what the pinned generator produces,
+# that it runs a program, and that it is formally equivalent to the Ibex
+# SystemVerilog sources.
+on:
+  push:
+    paths: ["src/ibex_*.v", "scripts/ibex_flow.py", "scripts/fetch_deps.sh", "syn/requirements.txt",
+            "test/ibex_smoke/**", ".github/workflows/ibex.yaml"]
+  workflow_dispatch:
+
+jobs:
+  ibex:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install tools
+        run: |
+          pip install -r syn/requirements.txt
+          sudo apt-get update && sudo apt-get install -y iverilog
+      - name: Fetch pinned Ibex
+        run: ./scripts/fetch_deps.sh
+      - name: Regenerate and compare
+        run: |
+          python3 scripts/ibex_flow.py convert small
+          git diff --exit-code src/ibex_small.v
+      - name: Simulation smoke test
+        run: test/ibex_smoke/run.sh
+      - name: Formal equivalence with the SystemVerilog sources
+        run: python3 scripts/ibex_flow.py equiv small
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ibex-logs
+          path: syn/ibex/out/*.log
