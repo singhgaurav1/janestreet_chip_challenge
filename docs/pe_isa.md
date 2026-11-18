@@ -405,8 +405,9 @@ With `STAMP_EN=1`, the engine compares the `STAMP_COUNT` pins at `IN_BASE`
 every cycle. On any change it pushes `{delta[15:0], pins[15:0]}` to the RX
 FIFO, where `delta` counts cycles since the previous record. If `delta`
 saturates at `0xFFFF`, a record is pushed anyway so long gaps stay
-measurable. If the FIFO is full, the record is dropped and `OVF` is set. The
-program may keep running but should not push. This is the on-chip logic
+measurable. If the FIFO is full, or the program pushed to it in the same
+cycle (the FIFO has one write port), the record is dropped and `OVF` is set.
+The program may keep running but should not push. This is the on-chip logic
 analyzer and the capture path for unknown protocols.
 
 ## 6. CPU register map (draft)

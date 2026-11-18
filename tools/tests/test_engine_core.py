@@ -357,3 +357,10 @@ def test_autosync_snap_cases(sp, pad_edge, expect):
             ticks.append(c)
             last = e.ticks
     assert [t for t in ticks if t >= expect[0]][:len(expect)] == expect
+
+
+def test_timestamper_drops_record_when_program_pushes_same_cycle():
+    blk, e = setup("l: push noblock\n jmp l\n", stamp_en=1, stamp_count=1, in_base=0)
+    # first stamp (initial state) coincides with the first push in cycle 0
+    blk.step()
+    assert len(e.rxf) == 1 and e.ovf == 1

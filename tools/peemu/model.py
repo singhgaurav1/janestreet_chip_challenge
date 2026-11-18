@@ -214,6 +214,7 @@ class Engine:
         qual = edge and (c.sync_edge == 0 or (c.sync_edge == 1 and f) or (c.sync_edge == 2 and not f))
         self.jpin = f
 
+        rx_before = len(self.rxf)        # the RX FIFO has one write port per cycle
         tick = False
         if self.enabled:
             if qual and self.sync_armed:     # frame start: plain reload, no tick this cycle
@@ -242,7 +243,7 @@ class Engine:
                 self.stalled = self._issue(w, snap, eff, forced=False) == STALL
 
         if self.enabled and c.stamp_en:
-            self._stamp(snap)
+            self._stamp(snap, rx_before)
 
         self.h2, self.h1, self.f_prev = self.h1, s, f
 
@@ -273,12 +274,14 @@ class Engine:
         self.div_cnt = c.sync_phase  # same slot: move it
         return False
 
-    def _stamp(self, snap: Snapshot):
+    def _stamp(self, snap: Snapshot, rx_before: int):
         cur = rotr(snap.pins, self.cfg.in_base) & mask(self.cfg.stamp_count)
         self.stamp_t = min(self.stamp_t + 1, 0xFFFF)
         if self.stamp_prev is None or cur != self.stamp_prev or self.stamp_t == 0xFFFF:
             rec = ((0 if self.stamp_prev is None else self.stamp_t) << 16) | cur
-            if len(self.rxf) < self.depth:
+            # one FIFO write port: a record is dropped (OVF) if the FIFO is full
+            # or the program pushed in this same cycle
+            if len(self.rxf) == rx_before and rx_before < self.depth:
                 self.rxf.append(rec)
             else:
                 self.ovf = 1
