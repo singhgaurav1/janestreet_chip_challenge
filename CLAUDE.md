@@ -34,8 +34,9 @@ Architecture plan (source of decisions): https://claude.ai/artifact/VHZMwCqiHRDP
 - `examples/pe/` PE assembly examples
 
 ## Tools
-`pip install --break-system-packages yowasp-yosys` (includes the slang SV frontend;
-use `read_slang --threads 1 --compat vcs`). GitHub release downloads are blocked from
+`pip install --break-system-packages -r syn/requirements.txt` (pinned yowasp-yosys, includes
+the slang SV frontend; use `read_slang --threads 1 --compat vcs`). The WASM Yosys can only
+open files inside the repo tree; use `syn/ibex/out/` for scratch. Icarus: `apt-get install iverilog`. GitHub release downloads are blocked from
 the Claude workspace; git clones and PyPI work. Full GDS runs on GitHub Actions (`gds.yaml`).
 
 ## Status (2026-11-18)
@@ -44,8 +45,13 @@ the Claude workspace; git clones and PyPI work. Full GDS runs on GitHub Actions 
 - Done: PE ISA spec v0.1 (`docs/pe_isa.md`), `tools/peemu` assembler + cycle-accurate golden
   model, example programs (`examples/pe/`: UART, SPI modes 0–3, I2C controller/target,
   NRZI+stuffed+CRC bitstream TX/RX), 242 tests (`python -m pytest tools/tests`).
-- Next: Ibex SV-to-Verilog conversion + equivalence; top-level skeleton with SRAM macro;
-  first full GDS run; set CLOCK_PERIOD to 16.67 ns; then PE RTL in lockstep with the model.
+- Done: Ibex `small` (RV32IMC, FF regfile) converted to `src/ibex_small.v` (modules
+  `ibex_small_top`, `ibex_small__*`), formally equivalent to the SV sources, runs an RV32IMC
+  smoke program in Icarus (`test/ibex_smoke/run.sh`). Flow: `scripts/ibex_flow.py`; CI:
+  `.github/workflows/ibex.yaml`. Never edit `src/ibex_small.v` by hand; regenerate.
+- Next: top-level skeleton (Ibex + SRAM macro + bus + SPI boot bridge + one PE; map
+  `prim_clock_gating` to the IHP clock-gate cell); first full GDS run; CLOCK_PERIOD 16.67 ns;
+  then PE RTL in lockstep with the model.
 
 ## PE toolchain rules
 - `docs/pe_isa.md` and `tools/peemu/model.py` must agree; change both plus a test.

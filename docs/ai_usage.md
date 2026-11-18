@@ -7,6 +7,7 @@ flow accurately.
 
 | Date | Area | What the AI did | Human decision |
 |---|---|---|---|
+| 2026-11-18 | Ibex conversion | Wrote the SV-to-Verilog conversion flow (yosys-slang, hierarchy kept), the formal equivalence proof (25,035 points, X-aware refinement for one `unique case` point), a mutation check showing the proof catches a one-operator change, an Icarus smoke test with a hand-encoded RV32IMC program, and CI | Pending owner review |
 | 2026-11-18 | PE ISA + toolchain | Wrote the PE ISA spec, assembler, cycle-accurate golden model, example programs and 242 tests (independent protocol models, directed cycle-exact tests, fuzzing). Found and fixed through testing: hard-sync tick loss (now nearest-slot resync), open-drain reset glitch, I2C Fast-mode timing | Pending owner review; ISA refinements listed in `docs/pe_isa.md` section 8 |
 | 2026-11-18 | Repo setup | Seeded repo from the TT IHP template, pinned Ibex and IHP PDK, added Ibex area-check scripts | Owner chose Ibex and full scope |
 | 2026-11-18 | Feasibility | Synthesized Ibex configs on IHP CMOS5L cells to measure area | - |
