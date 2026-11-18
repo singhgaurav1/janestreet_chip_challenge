@@ -1,0 +1,96 @@
+; Generic NRZI + bit-stuffed + CRC-16 framed bitstream, the shape used by
+; USB. Nothing here is in hardware: the assists are configured by directives.
+; Frames are packed in wire order, LSB first.
+
+.program bitstream_tx
+; TX FIFO: word 0 = number of data bits after the 8-bit SYNC, minus 2;
+; then the frame bits (SYNC in bits [7:0] of the first word, data after).
+; Sends SYNC, data, ~CRC16 (reflected, LSB first), then 2 bit-times of
+; SE0 and 1 bit-time of idle. 2 ticks per bit: clkdiv = f_sys / (2 * rate).
+; Known limit: if the CRC ends in a full run of ones, the trailing stuff bit
+; before SE0 is not sent (the stuffer only inserts ahead of an OUT bit).
+; Pins: out_base = set_base = D+, D- = D+ + 1 (coder_diff), set_count = 2.
+.config out_shift_right 1
+.config autopull 1
+.config pull_thresh 32
+.config bit_ticks 2
+.config coder_mode nrzi
+.config coder_diff 1
+.config coder_idle 1
+.config stuff_mode ones
+.config stuff_n 6
+.config set_count 2
+.crc 16 0x8005 reflect init_ones
+    set pins, 1                   ; drive idle (J) before the first frame
+.wrap_target
+    pull                          ; bit count
+    out x, 32                     ; X = count, OSR empty -> next OUT autopulls
+    crcinit
+    assist on stuff, coder
+    set y, 6
+sync:
+    out bit, 1
+    jmp y--, sync
+    out bit, 1                    ; 8th SYNC bit
+    assist on crc                 ; CRC covers the data only
+data:
+    out bit, 1
+    jmp x--, data
+    out bit, 1                    ; last data bit
+    mov osr, ~crc                 ; append inverted CRC, LSB first
+    out bit, 1                    ; CRC bit 0
+    set x, 14
+crcl:
+    out bit, 1
+    jmp x--, crcl
+    set pins, 0               [2] ; SE0
+    assist off stuff, coder, crc
+    set pins, 1               [1] ; idle (J)
+
+
+.program bitstream_rx
+; TX FIFO: word 0 = number of data + CRC bits, minus 1;
+;          word 1 = SYNC pattern left-aligned (byte << 24);
+;          word 2 = expected CRC residue.
+; RX FIFO: data words (wire order, LSB first; last word partial), then
+; the STATUS word (bit 0 T = CRC good, bit 1 SERR = stuff error).
+; 8 ticks per bit: clkdiv = f_sys / (8 * rate). Hard sync on the first
+; edge, then autosync on every edge, both with sync_phase 0: tick 0 of every
+; bit sits just after its edge and IN samples at tick 4.
+; Pins: in_base = jmp_pin = D+.
+.config in_shift_right 1
+.config push_thresh 32
+.config bit_ticks 8
+.config coder_mode nrzi
+.config coder_idle 1
+.config stuff_mode ones
+.config stuff_n 6
+.config autosync 1
+.crc 16 0x8005 reflect init_ones
+    pull
+    out x, 32
+    pull
+    out y, 32
+    assist on coder, stuff
+    sync                          ; hard sync on the first edge of the packet
+    wait 0 jmppin                 ; start of packet (first K), tick 0
+    nop                       [2] ; move to mid-bit
+hunt:
+    in bit, 1                     ; mid-bit
+    match isr, 8                  ; last 8 bits == SYNC ?
+    jmp t, found
+    jmp hunt                  [4]
+found:
+    mov isr, null
+    crcinit
+    assist on crc             [2]
+data:
+    in bit, 1                 [4]
+    push iffull noblock
+    jmp x--, data             [1]
+    push noblock                  ; partial last word
+    pull
+    out y, 32                     ; Y = expected residue
+    match crc, 16
+    mov isr, status
+    push

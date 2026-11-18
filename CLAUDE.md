@@ -29,7 +29,9 @@ Architecture plan (source of decisions): https://claude.ai/artifact/VHZMwCqiHRDP
 - `test/` cocotb tests (TT template)
 - `syn/ibex/` Ibex area check (`synth_ibex.sh micro|emc|small`)
 - `scripts/fetch_deps.sh` pinned Ibex + IHP PDK into `deps/` (git-ignored)
-- `docs/` datasheet (`info.md`) and `ai_usage.md`
+- `docs/` datasheet (`info.md`), `pe_isa.md` (PE ISA spec) and `ai_usage.md`
+- `tools/peemu/` PE assembler + golden model; `tools/tests/` its tests
+- `examples/pe/` PE assembly examples
 
 ## Tools
 `pip install --break-system-packages yowasp-yosys` (includes the slang SV frontend;
@@ -39,5 +41,13 @@ the Claude workspace; git clones and PyPI work. Full GDS runs on GitHub Actions 
 ## Status (2026-11-18)
 - Repo seeded from ttihp-verilog-template; placeholder example design still in `src/project.v`.
 - Ibex measured: micro 9,235 cells / 0.143 mm², small 15,355 cells / 0.232 mm² (pre-layout).
-- Next: PE ISA spec + Python golden model; Ibex SV-to-Verilog conversion + equivalence;
-  top-level skeleton with SRAM macro; first full GDS run; set CLOCK_PERIOD to 16.67 ns.
+- Done: PE ISA spec v0.1 (`docs/pe_isa.md`), `tools/peemu` assembler + cycle-accurate golden
+  model, example programs (`examples/pe/`: UART, SPI modes 0–3, I2C controller/target,
+  NRZI+stuffed+CRC bitstream TX/RX), 242 tests (`python -m pytest tools/tests`).
+- Next: Ibex SV-to-Verilog conversion + equivalence; top-level skeleton with SRAM macro;
+  first full GDS run; set CLOCK_PERIOD to 16.67 ns; then PE RTL in lockstep with the model.
+
+## PE toolchain rules
+- `docs/pe_isa.md` and `tools/peemu/model.py` must agree; change both plus a test.
+- RTL tests compare against `PEBlock.state()` every cycle; random stimulus from `peemu.randprog`.
+- Protocol tests check against independent models in `tools/tests/vip.py`, never the model itself.
