@@ -15,9 +15,7 @@
   "//": "Users have reported that values up to 80 worked well for them.",
   "PL_TARGET_DENSITY_PCT": 60,
 
-  "//": "Timing: first build met 60 MHz at typ/fast but missed the slow corner (1.08 V, 125 C) slightly;",
-  "//": "delay-oriented ABC mapping trades some of the ample area headroom for speed.",
-  "SYNTH_STRATEGY": "DELAY 1",
+  "//": "SYNTH_STRATEGY stays at the default (AREA 0): DELAY 1 made the slow corner worse (-10 ns vs -0.07 ns).",
 
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",

@@ -59,12 +59,17 @@ module pe_block (
   wire [5:0] eng_reg = addr[7:2];
 
   // ---- per-engine registers ----------------------------------------------
+  // Only the bits defined in docs/pe_isa.md section 6 are stored; the rest
+  // read as 0 (constant flops are removed in synthesis).
+  localparam [31:0] M_CLKDIV = 32'hFFFF_FF00, M_EXEC   = 32'h3FFF_FFFF,
+                    M_SHIFT  = 32'h0000_3FFF, M_PIN    = 32'h1FFF_FFFF,
+                    M_ASSIST = 32'h01FF_FFFF;
   reg [31:0] r_clkdiv [0:3], r_exec [0:3], r_shift [0:3], r_pin [0:3];
   reg [31:0] r_assist [0:3], r_poly [0:3], r_timing [0:3];
   reg [3:0]  r_en;
 
   // ---- shared state ------------------------------------------------------
-  reg [15:0] imem [0:63];
+  wire [15:0] imem [0:63];
   reg [7:0]  flags;
   reg [23:8] pad_out;
   reg [15:8] pad_oe;
@@ -73,6 +78,22 @@ module pe_block (
   reg [15:0] sync1, sync2;
 
   wire [31:0] pins = {8'h00, pad_out[23:16], sync2};
+
+  // ---- instruction memory: 64 x 16 flops, one clock gate per word ---------
+  // A write enables exactly one word's clock, so the word flops need no
+  // enable mux and the array draws no clock power when idle.
+  wire imem_wr = wr & (addr[11:8] == 4'h4);
+  generate
+    for (g = 0; g < 64; g = g + 1) begin : gen_imem
+      wire       gclk;
+      reg [15:0] word;
+      cell_clock_gate u_cg (
+          .clk_i(clk), .en_i(imem_wr & (addr[7:2] == g)), .test_en_i(1'b0), .clk_o(gclk)
+      );
+      always @(posedge gclk) word <= wdata[15:0];
+      assign imem[g] = word;
+    end
+  endgenerate
 
   // ---- engines -----------------------------------------------------------
   wire [31:0] e_out_we [0:3], e_out_val [0:3], e_oe_we [0:3], e_oe_val [0:3];
@@ -153,17 +174,17 @@ module pe_block (
         if (is_eng) begin
           case (eng_reg)
             6'h00: r_en[eng_sel] <= wdata[0];
-            6'h01: r_clkdiv[eng_sel] <= wdata;
-            6'h02: r_exec[eng_sel] <= wdata;
-            6'h03: r_shift[eng_sel] <= wdata;
-            6'h04: r_pin[eng_sel] <= wdata;
-            6'h05: r_assist[eng_sel] <= wdata;
+            6'h01: r_clkdiv[eng_sel] <= wdata & M_CLKDIV;
+            6'h02: r_exec[eng_sel] <= wdata & M_EXEC;
+            6'h03: r_shift[eng_sel] <= wdata & M_SHIFT;
+            6'h04: r_pin[eng_sel] <= wdata & M_PIN;
+            6'h05: r_assist[eng_sel] <= wdata & M_ASSIST;
             6'h06: r_poly[eng_sel] <= wdata;
             6'h07: r_timing[eng_sel] <= wdata;
             default: ;
           endcase
         end else if (addr[11:8] == 4'h4) begin
-          imem[addr[7:2]] <= wdata[15:0];
+          // instruction memory: written by the gated word flops below
         end else begin
           case (addr)
             12'h500: flags <= wdata[7:0];

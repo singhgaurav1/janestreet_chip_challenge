@@ -70,6 +70,15 @@ def run(blk: PEBlock, cycles: int, each=None):
         blk.step()
 
 
+def run_drain(blk: PEBlock, e, cycles: int) -> list:
+    """Run, popping engine e's RX FIFO after every cycle (a CPU keeping up)."""
+    out = []
+    for _ in range(cycles):
+        blk.step()
+        out += drain(e)
+    return out
+
+
 def capture(blk: PEBlock, cycles: int, pins, each=None) -> dict:
     """Run and record each pin's output level per cycle (before the step)."""
     wave = {p: [] for p in pins}

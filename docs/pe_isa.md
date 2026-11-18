@@ -33,7 +33,7 @@ Design rules that shape the ISA:
 | `T` | 1 | Test flag (MATCH result, WAIT timeout, stuff error) |
 | `SERR` | 1 | Sticky stuff-error flag (cleared by the CPU) |
 | `delay` | 5 | Remaining delay ticks |
-| TX FIFO, RX FIFO | 4 × 32 each | CPU → PE and PE → CPU |
+| TX FIFO, RX FIFO | 2 × 32 each | CPU → PE and PE → CPU |
 | CRC state | 32 | LFSR register |
 | Divider | 16.8 | Integer + fractional counter |
 

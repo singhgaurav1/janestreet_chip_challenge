@@ -9,8 +9,8 @@ utilization. Planning ceiling: **~0.60 mm² of cells + macros**.
 |---|---|---|
 | Ibex `small` (RV32IMC) + SoC glue | 0.253 mm² | `syn/ibex/out/soc.stat` |
 | SRAM 512×32 macro | 0.080 mm² | LEF |
-| **Protocol Engine block, as written** | **0.62–0.68 mm²** | `pe_block` synthesis |
-| Total | ~0.95–1.0 mm² | does not fit |
+| **Protocol Engine block, after rework** | **0.516 mm²** (was 0.631) | `pe_block` synthesis |
+| Total | ~0.85 mm² | does not fit |
 
 The plan estimated 2–3k cells per engine. The verified RTL (`src/pe_engine.v`,
 lockstep-equal to the golden model) is about 11k cells per engine.
@@ -23,7 +23,24 @@ lockstep-equal to the golden model) is about 11k cells per engine.
 | Engine FIFOs (each) | ~21k µm² | TX + RX, 4 × 32 bits each |
 | Block, shared | ~199k µm² | 64×16 instruction memory in flops (~50k) with 4 × 64:1 read ports (~45k), 4 × 7 config registers (~44k), pads, flags, register read mux |
 
-## Options
+## Rework done (no ISA change)
+
+Lockstep-verified (300 seeds × 1000 cycles × 2 program styles, all 115 bins).
+
+| Change | Effect |
+|---|---|
+| One 64-bit funnel shifter for IN/OUT, one pin-window unit for OUT/SET/MOV, one shared operand mux | engine 121k → 107k µm² |
+| 2-deep TX/RX FIFOs (model default, spec and tests updated) | engine 107k → 96k µm² |
+| Config registers store only defined bits (unused bits read 0) | −152 flops |
+| Instruction memory: one clock gate per word, no enable muxes | −1,024 mux2 |
+
+Block: 0.631 → 0.516 mm² (4 × 96k engines + 130k shared).
+
+Remaining big items per engine, measured by tying config fields to constants:
+configurable OUT/SET/side bases −20k µm², IN base −6k, CRC −5k, side-set −5k,
+both shift directions −3k, coder/stuffer −3k, WAIT timeout −2k.
+
+## Options (original list; 1–3 are now done)
 
 No-regret (no ISA change; lockstep keeps them safe):
 

@@ -60,8 +60,12 @@ the Claude workspace; git clones and PyPI work. Full GDS runs on GitHub Actions 
   (`cd test && make`; GL in `gds.yaml`). Synth: 16.4k cells (0.253 mm²) + 0.080 mm² macro.
 - SRAM: CMOS5L has no SRAM in the released PDK; the TT flow's PDK aliases the SG13G2 macros
   (`pdk_dir::libs.ref/sg13cmos5l_sram`), and TT's ttihp-cmos5l-sram-example integrates them.
-- Next: PE RTL (one engine first) in lockstep with the golden model, attached at 0x1000_1000;
-  pin crossbar; then firmware drivers validating every protocol on Ibex before tapeout.
+- Done: PE RTL (`src/pe_block.v`, `pe_engine.v`, `pe_fifo.v`), lockstep-equal to the model
+  (`cd test/pe && make SEEDS=0:300`). Area-reworked without ISA change: PE block 0.516 mm²
+  (`docs/area.md`). Total ~0.85 mm² vs ~0.60 mm² ceiling: owner decision pending (Ibex micro,
+  3 engines, ISA trims). Slow-corner setup fails (Ibex FF regfile read path); keep AREA synth.
+- Next: owner's area decision; integrate pe_block at 0x1000_1000; firmware drivers validating
+  every protocol on Ibex before tapeout; timing closure.
 
 ## PE toolchain rules
 - `docs/pe_isa.md` and `tools/peemu/model.py` must agree; change both plus a test.

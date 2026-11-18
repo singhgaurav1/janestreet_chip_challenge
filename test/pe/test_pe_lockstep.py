@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from peemu import isa                                    # noqa: E402
 from peemu.config import CONFIG_REGS, REG_OFFSETS        # noqa: E402
 from peemu.model import PEBlock                          # noqa: E402
+FIFO_DEPTH = 2                                           # must match src/pe_engine.v
 from peemu.randprog import random_engine, random_instr   # noqa: E402
 
 M32 = 0xFFFFFFFF
@@ -130,7 +131,7 @@ class Rig:
                 cnt = int(fifo.cnt.value)
                 assert cnt == len(q), f"cycle {self.cycle} engine {n} {name} level {cnt} vs {len(q)}"
                 rdp = int(fifo.rd.value)
-                got = [int(fifo.mem[(rdp + k) % 4].value) for k in range(cnt)]
+                got = [int(fifo.mem[(rdp + k) % FIFO_DEPTH].value) for k in range(cnt)]
                 assert got == list(q), f"cycle {self.cycle} engine {n} {name} {got} vs {list(q)}"
         assert int(d.flags_out.value) == m.flags, f"cycle {self.cycle} flags"
         assert int(d.uo_out.value) == m.uo_out, \
@@ -181,6 +182,14 @@ async def run_seed(dut, seed, cycles, serial=False):
         for name in CONFIG_REGS:
             await rig.step((1, reg(n, name), regs[name]),
                            lambda n=n, cfg=cfg: m.engines[n].configure(cfg))
+
+    # readback: stored config bits (packed per docs/pe_isa.md 6) and imem
+    for n, cfg in enumerate(cfgs):
+        regs = cfg.to_regs()
+        for name in CONFIG_REGS:
+            await rig.step((0, reg(n, name), 0), lambda v=regs[name]: (v, None))
+    for i in rnd.sample(range(isa.IMEM_DEPTH), 8):
+        await rig.step((0, 0x400 + 4 * i, 0), lambda w=code[i]: (w, None))
 
     # pads: random owners and open drain
     owners = {p: rnd.choice([0, 1, 2, 3, 4, 7]) for p in range(8, 24)}

@@ -562,7 +562,7 @@ class Engine:
 class PEBlock:
     """Four engines, shared instruction memory, event flags and pad crossbar."""
 
-    def __init__(self, fifo_depth: int = 4):
+    def __init__(self, fifo_depth: int = 2):
         self.imem = [isa.NOP] * isa.IMEM_DEPTH
         self.flags = 0
         self.pad_out = 0           # bits indexed by pin index (8..23 used)

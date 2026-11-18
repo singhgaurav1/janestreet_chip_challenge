@@ -178,21 +178,26 @@ module pe_engine #(
   reg [15:0] force_instr;
 
   // ---- FIFOs --------------------------------------------------------------
+  // 2 words each: enough for back-to-back CPU service at 60 MHz (docs/area.md)
+  localparam integer FIFO_DEPTH = 2;
+  localparam integer FAW        = 1;
   reg         eng_txf_pop, eng_rxf_push;
   reg  [31:0] eng_rxf_data;
   wire [31:0] txf_head;
-  wire [2:0]  txf_level, rxf_level;
+  wire [FAW:0] txf_lvl, rxf_lvl;
+  wire [2:0]  txf_level = {{(2 - FAW){1'b0}}, txf_lvl};   // STATUS keeps 3-bit fields
+  wire [2:0]  rxf_level = {{(2 - FAW){1'b0}}, rxf_lvl};
   wire        txf_empty, rxf_full;
 
-  pe_fifo #(.WIDTH(32), .DEPTH(4), .AW(2), .ALLOW_PUSH_WHEN_POP(1)) u_txf (
+  pe_fifo #(.WIDTH(32), .DEPTH(FIFO_DEPTH), .AW(FAW), .ALLOW_PUSH_WHEN_POP(1)) u_txf (
       .clk(clk), .rst_n(rst_n), .clear(1'b0),
       .push(cpu_txf_push), .wdata(cpu_txf_data), .push_drop(cpu_txf_drop),
-      .pop(eng_txf_pop), .rdata(txf_head), .level(txf_level), .empty(txf_empty), .full()
+      .pop(eng_txf_pop), .rdata(txf_head), .level(txf_lvl), .empty(txf_empty), .full()
   );
-  pe_fifo #(.WIDTH(32), .DEPTH(4), .AW(2), .ALLOW_PUSH_WHEN_POP(0)) u_rxf (
+  pe_fifo #(.WIDTH(32), .DEPTH(FIFO_DEPTH), .AW(FAW), .ALLOW_PUSH_WHEN_POP(0)) u_rxf (
       .clk(clk), .rst_n(rst_n), .clear(1'b0),
       .push(eng_rxf_push), .wdata(eng_rxf_data), .push_drop(),
-      .pop(cpu_rxf_pop), .rdata(cpu_rxf_data), .level(rxf_level), .empty(), .full(rxf_full)
+      .pop(cpu_rxf_pop), .rdata(cpu_rxf_data), .level(rxf_lvl), .empty(), .full(rxf_full)
   );
 
   // STATUS: [4:0] PC, [5] T, [6] SERR, [7] OVF, [11:8] TX level, [15:12] RX level, [16] stalled
@@ -245,6 +250,15 @@ module pe_engine #(
   reg [15:0] stamp_cur;
   reg        stamp_hit;
   reg [6:0]  isr_sum;
+  reg [2:0]  osel;
+  reg [31:0] src_val, out_src, out_data, dm, io_mask, in_isr;
+  reg        lvl_rx, b_rx, out_refill;
+  reg [5:0]  n_io, sh_s;
+  reg [63:0] sh_a, sh_f;
+  reg        win_req, win_oe;
+  reg [4:0]  win_base;
+  reg [5:0]  win_cnt;
+  reg [31:0] win_data;
 
   localparam [1:0] R_DONE = 2'd0, R_STALL = 2'd1, R_REEXEC = 2'd2;
 
@@ -403,6 +417,56 @@ module pe_engine #(
     rd_pins     = rotr(pins, c_in_base);
     rx_full_now = rxf_full;
 
+    // ---- shared operand mux (IN / MOV / MATCH sources, MOV encoding) -------
+    case (op)
+      3'd2: osel = (fa == 3'd0) ? 3'd0 : (fa == 3'd1) ? 3'd1 : (fa == 3'd2) ? 3'd2 :
+                   (fa == 3'd6) ? 3'd5 : (fa == 3'd7) ? 3'd6 : 3'd3;
+      3'd6: osel = (fa == 3'd0) ? 3'd5 : (fa == 3'd1) ? 3'd6 : (fa == 3'd2) ? 3'd1 :
+                   (fa == 3'd3) ? 3'd7 : (fa == 3'd4) ? 3'd0 : 3'd3;
+      default: osel = opnd[2:0];
+    endcase
+    case (osel)
+      3'd0: src_val = rd_pins;
+      3'd1: src_val = x;
+      3'd2: src_val = y;
+      3'd3: src_val = 32'h0;
+      3'd4: src_val = {20'h0, 1'b0, rxf_level, 1'b0, txf_level, rx_full_now, txf_empty, serr, t};
+      3'd5: src_val = isr;
+      3'd6: src_val = osr;
+      default: src_val = crc;
+    endcase
+
+    // ---- serial RX bit: line decode (IN bit) ------------------------------
+    lvl_rx = pins[c_in_base];
+    case (coder_on ? c_coder_mode : 2'd0)
+      2'd1: b_rx = (lvl_rx == rx_prev);
+      2'd2: b_rx = (lvl_rx != rx_prev);
+      default: b_rx = lvl_rx;
+    endcase
+
+    // ---- shared 64-bit funnel shifter (IN / OUT) ----------------------------
+    // OUT right: {0, src} >> n        -> osr' = low half, data = src & mask
+    // OUT left:  {src, 0} >> (32 - n) -> data = high half, osr' = low half
+    // IN right:  {dm, isr} >> n       -> isr' = low half
+    // IN left:   {isr, 0} >> (32 - n) -> isr' = low half | dm
+    n_io = ((op == 3'd2 && fa == 3'd4) || (op == 3'd3 && fa == 3'd7)) ? 6'd1 : nbits;
+    io_mask    = lowmask(n_io);
+    out_refill = c_autopull && (osr_cnt >= c_pull_th);
+    out_src    = out_refill ? txf_head : osr;
+    dm         = ((fa == 3'd4) ? {31'h0, b_rx} : src_val) & io_mask;
+    if (op == 3'd3) begin
+      sh_a = c_out_right ? {32'h0, out_src} : {out_src, 32'h0};
+      sh_s = c_out_right ? n_io : (6'd32 - n_io);
+    end else begin
+      sh_a = c_in_right ? {dm, isr} : {isr, 32'h0};
+      sh_s = c_in_right ? n_io : (6'd32 - n_io);
+    end
+    sh_f     = sh_a >> sh_s;
+    out_data = c_out_right ? (out_src & io_mask) : sh_f[63:32];
+    in_isr   = c_in_right ? sh_f[31:0] : (sh_f[31:0] | dm);
+
+    win_req = 1'b0; win_oe = 1'b0; win_base = 5'd0; win_cnt = 6'd0; win_data = 32'h0;
+
     if (do_issue) begin
       case (op)
         // ---------------- JMP -------------------------------------------------
@@ -442,46 +506,25 @@ module pe_engine #(
         end
         // ---------------- IN --------------------------------------------------
         3'd2: begin
-          if (fa == 3'd4) nbits = 6'd1;
-          isr_sum = {1'b0, isr_cnt} + {1'b0, nbits};
+          isr_sum = {1'b0, isr_cnt} + {1'b0, n_io};
           if (c_autopush && isr_sum >= {1'b0, c_push_th} && rx_full_now) res = R_STALL;
           else begin
             if (fa == 3'd4) begin                     // serial RX bit path
-              lvl = pins[c_in_base];
-              cmode = coder_on ? c_coder_mode : 2'd0;
-              case (cmode)
-                2'd1: b = (lvl == rx_prev);
-                2'd2: b = (lvl != rx_prev);
-                default: b = lvl;
-              endcase
-              n_rx_prev = lvl;
+              n_rx_prev  = lvl_rx;
               need_stuff = stuff_on && (run >= c_stuff_n);
               tgt = (c_stuff_mode == 2'd0) ? last : (c_stuff_mode == 2'd2 ? 1'b0 : 1'b1);
-              if (need_stuff && (b == ~tgt)) begin
-                stuff_update(b, c_stuff_mode);
+              if (need_stuff && (b_rx == ~tgt)) begin
+                stuff_update(b_rx, c_stuff_mode);
                 res = R_REEXEC;
               end else begin
                 if (need_stuff) begin                 // stuff error
-                  n_t = 1'b1; n_serr = 1'b1; n_run = 4'd0; n_last = b;
-                end else if (stuff_on) stuff_update(b, c_stuff_mode);
-                if (crc_on) n_crc = crc_step(crc, b, c_crc_width, cfg_crc_poly, c_crc_reflect);
-                data = {31'h0, b};
+                  n_t = 1'b1; n_serr = 1'b1; n_run = 4'd0; n_last = b_rx;
+                end else if (stuff_on) stuff_update(b_rx, c_stuff_mode);
+                if (crc_on) n_crc = crc_step(crc, b_rx, c_crc_width, cfg_crc_poly, c_crc_reflect);
               end
-            end else begin
-              case (fa)
-                3'd0: data = rd_pins;
-                3'd1: data = x;
-                3'd2: data = y;
-                3'd6: data = isr;
-                3'd7: data = osr;
-                default: data = 32'h0;
-              endcase
             end
             if (res == R_DONE) begin
-              data = data & lowmask(nbits);
-              if (nbits == 6'd32) n_isr = data;
-              else if (c_in_right) n_isr = (isr >> nbits) | (data << (6'd32 - nbits));
-              else n_isr = (isr << nbits) | data;
+              n_isr     = in_isr;
               n_isr_cnt = (isr_sum >= 7'd32) ? 6'd32 : isr_sum[5:0];
               if (c_autopush && n_isr_cnt >= c_push_th) begin
                 eng_rxf_push = 1'b1;
@@ -500,50 +543,32 @@ module pe_engine #(
             coder_drive(~tgt, coder_on ? c_coder_mode : 2'd0, c_bit_ticks[4:1], c_out_base,
                         c_coder_diff);
             res = R_REEXEC;
+          end else if (out_refill && txf_empty) begin
+            res = R_STALL;                            // autopull with nothing to pull
           end else begin
-            if (fa == 3'd7) nbits = 6'd1;
-            if (c_autopull && osr_cnt >= c_pull_th) begin
-              if (txf_empty) res = R_STALL;
-              else begin
-                eng_txf_pop = 1'b1;
-                n_osr = txf_head;
-                n_osr_cnt = 6'd0;
+            if (out_refill) eng_txf_pop = 1'b1;
+            data      = out_data;
+            n_osr     = sh_f[31:0];
+            isr_sum   = (out_refill ? 7'd0 : {1'b0, osr_cnt}) + {1'b0, n_io};
+            n_osr_cnt = (isr_sum >= 7'd32) ? 6'd32 : isr_sum[5:0];
+            case (fa)
+              3'd0, 3'd4: begin                       // pins / pindirs
+                win_req = 1'b1; win_oe = fa[2]; win_base = c_out_base; win_cnt = n_io;
+                win_data = data;
               end
-            end
-            if (res == R_DONE) begin
-              if (c_out_right) begin
-                data  = n_osr & lowmask(nbits);
-                n_osr = (nbits == 6'd32) ? 32'h0 : (n_osr >> nbits);
-              end else begin
-                data  = (n_osr >> (6'd32 - nbits)) & lowmask(nbits);
-                n_osr = (nbits == 6'd32) ? 32'h0 : (n_osr << nbits);
+              3'd1: n_x = data;
+              3'd2: n_y = data;
+              3'd5: begin jump = 1'b1; target = data[4:0]; end
+              3'd6: begin n_isr = data; n_isr_cnt = n_io; end
+              3'd7: begin
+                b = data[0];
+                if (crc_on) n_crc = crc_step(crc, b, c_crc_width, cfg_crc_poly, c_crc_reflect);
+                if (stuff_on) stuff_update(b, c_stuff_mode);
+                coder_drive(b, coder_on ? c_coder_mode : 2'd0, c_bit_ticks[4:1], c_out_base,
+                            c_coder_diff);
               end
-              n_osr_cnt = ({1'b0, n_osr_cnt} + {1'b0, nbits} >= 7'd32) ? 6'd32 : n_osr_cnt + nbits;
-              case (fa)
-                3'd0: begin
-                  wmask = rotl(lowmask(nbits), c_out_base);
-                  op_out_we = op_out_we | wmask;
-                  op_out_val = (op_out_val & ~wmask) | (rotl(data, c_out_base) & wmask);
-                end
-                3'd1: n_x = data;
-                3'd2: n_y = data;
-                3'd4: begin
-                  wmask = rotl(lowmask(nbits), c_out_base);
-                  op_oe_we = op_oe_we | wmask;
-                  op_oe_val = (op_oe_val & ~wmask) | (rotl(data, c_out_base) & wmask);
-                end
-                3'd5: begin jump = 1'b1; target = data[4:0]; end
-                3'd6: begin n_isr = data; n_isr_cnt = nbits; end
-                3'd7: begin
-                  b = data[0];
-                  if (crc_on) n_crc = crc_step(crc, b, c_crc_width, cfg_crc_poly, c_crc_reflect);
-                  if (stuff_on) stuff_update(b, c_stuff_mode);
-                  coder_drive(b, coder_on ? c_coder_mode : 2'd0, c_bit_ticks[4:1], c_out_base,
-                              c_coder_diff);
-                end
-                default: ;
-              endcase
-            end
+              default: ;
+            endcase
           end
         end
         // ---------------- PUSH / PULL / EVT / CTL ------------------------------
@@ -610,31 +635,16 @@ module pe_engine #(
         end
         // ---------------- MOV -------------------------------------------------
         3'd5: begin
-          case (opnd[2:0])
-            3'd0: data = rd_pins;
-            3'd1: data = x;
-            3'd2: data = y;
-            3'd3: data = 32'h0;
-            3'd4: data = {20'h0, 1'b0, rxf_level, 1'b0, txf_level, rx_full_now, txf_empty, serr, t};
-            3'd5: data = isr;
-            3'd6: data = osr;
-            default: data = crc;
-          endcase
+          data = src_val;
           if (opnd[3]) data = ~data;
           if (opnd[4]) data = rev32(data);
           case (fa)
-            3'd0: begin
-              wmask = rotl(lowmask(c_out_count), c_out_base);
-              op_out_we = op_out_we | wmask;
-              op_out_val = (op_out_val & ~wmask) | (rotl(data, c_out_base) & wmask);
+            3'd0, 3'd3: begin                         // pins / pindirs
+              win_req = 1'b1; win_oe = (fa == 3'd3); win_base = c_out_base;
+              win_cnt = c_out_count; win_data = data;
             end
             3'd1: n_x = data;
             3'd2: n_y = data;
-            3'd3: begin
-              wmask = rotl(lowmask(c_out_count), c_out_base);
-              op_oe_we = op_oe_we | wmask;
-              op_oe_val = (op_oe_val & ~wmask) | (rotl(data, c_out_base) & wmask);
-            end
             3'd4: begin jump = 1'b1; target = data[4:0]; end
             3'd5: begin n_isr = data; n_isr_cnt = 6'd0; end
             3'd6: begin n_osr = data; n_osr_cnt = 6'd0; end
@@ -643,37 +653,36 @@ module pe_engine #(
         end
         // ---------------- MATCH -----------------------------------------------
         3'd6: begin
-          case (fa)
-            3'd0: data = isr;
-            3'd1: data = osr;
-            3'd2: data = x;
-            3'd3: data = crc;
-            3'd4: data = rd_pins;
-            default: data = 32'h0;
-          endcase
           wmask = lowmask(nbits);
           if (fa == 3'd0 && c_in_right) wmask = wmask << (6'd32 - nbits);
-          n_t = ((data & wmask) == (y & wmask));
+          n_t = ((src_val & wmask) == (y & wmask));
         end
         // ---------------- SET -------------------------------------------------
         default: begin
           case (fa)
-            3'd0: begin
-              wmask = rotl(lowmask({3'b000, c_set_count}), c_set_base);
-              op_out_we = op_out_we | wmask;
-              op_out_val = (op_out_val & ~wmask) | (rotl({27'h0, fb5}, c_set_base) & wmask);
+            3'd0, 3'd4: begin                         // pins / pindirs
+              win_req = 1'b1; win_oe = fa[2]; win_base = c_set_base;
+              win_cnt = {3'b000, c_set_count}; win_data = {27'h0, fb5};
             end
             3'd1: n_x = {27'h0, fb5};
             3'd2: n_y = {27'h0, fb5};
-            3'd4: begin
-              wmask = rotl(lowmask({3'b000, c_set_count}), c_set_base);
-              op_oe_we = op_oe_we | wmask;
-              op_oe_val = (op_oe_val & ~wmask) | (rotl({27'h0, fb5}, c_set_base) & wmask);
-            end
             default: ;
           endcase
         end
       endcase
+
+      // one pin-window unit for OUT / MOV / SET
+      if (win_req) begin
+        wmask = rotl(lowmask(win_cnt), win_base);
+        wv    = rotl(win_data, win_base);
+        if (win_oe) begin
+          op_oe_we  = op_oe_we | wmask;
+          op_oe_val = (op_oe_val & ~wmask) | (wv & wmask);
+        end else begin
+          op_out_we  = op_out_we | wmask;
+          op_out_val = (op_out_val & ~wmask) | (wv & wmask);
+        end
+      end
 
       // side-set: applied on every issue, wins over the op's own pin writes
       if (side_present) begin
