@@ -18,6 +18,10 @@ jobs:
         with:
           pdk: ihp-sg13cmos5l # or ihp-sg13g2
 
+      - name: Timing and area summary
+        if: always()
+        run: python3 scripts/timing_report.py runs/wokwi
+
   precheck:
     needs: gds
     runs-on: ubuntu-24.04
