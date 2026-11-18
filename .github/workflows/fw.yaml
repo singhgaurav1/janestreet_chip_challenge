@@ -1,0 +1,46 @@
+name: fw
+
+# Firmware workstream (F2): build for Ibex small (rv32imc) and micro (rv32ec),
+# HAL unit tests, riscv-tests on the converted and upstream cores, and the
+# firmware runtime tests on the standalone-Ibex testbench. See fw/README.md.
+on:
+  push:
+    paths: ["fw/**", "test/fw/**", "src/ibex_*.v", "docs/pe_isa.md", "tools/peemu/**",
+            "scripts/fetch_deps.sh", ".github/workflows/fw.yaml"]
+  pull_request:
+    paths: ["fw/**", "test/fw/**", "src/ibex_*.v", "docs/pe_isa.md", "tools/peemu/**",
+            "scripts/fetch_deps.sh", ".github/workflows/fw.yaml"]
+  workflow_dispatch:
+
+jobs:
+  fw:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf verilator
+          riscv64-unknown-elf-gcc --version | head -1
+          verilator --version
+          pip install -r tools/requirements.txt
+      - name: Fetch pinned Ibex and riscv-tests
+        run: |
+          ./scripts/fetch_deps.sh
+          ./fw/scripts/fetch_riscv_tests.sh
+      - name: Firmware CI
+        run: ./fw/ci.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fw-images-and-logs
+          path: |
+            fw/build/*_ram4096/*.bin
+            fw/build/*_ram4096/*.hex
+            fw/build/*_ram4096/*.map
+            fw/build/riscv-tests/results.*.txt
+            fw/build/tests/**/*.log

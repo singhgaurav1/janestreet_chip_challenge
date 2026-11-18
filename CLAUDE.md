@@ -37,6 +37,9 @@ Architecture plan (source of decisions): https://claude.ai/artifact/VHZMwCqiHRDP
 - `docs/` datasheet (`info.md`), `pe_isa.md` (PE ISA spec) and `ai_usage.md`
 - `tools/peemu/` PE assembler + golden model; `tools/tests/` its tests
 - `examples/pe/` PE assembly examples
+- `fw/` Ibex firmware (firmware chat; written from specs only): see `fw/README.md`, open
+  questions in `fw/QUESTIONS.md`; `test/fw/` its standalone-Ibex Verilator testbench;
+  everything runs with `fw/ci.sh`
 
 ## Tools
 Firmware: `pip install -r firmware/requirements.txt` (ziglang). Lint: `apt-get install verilator`.
