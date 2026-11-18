@@ -96,6 +96,30 @@ def clean_names(modules: list[str], prefix: str) -> dict[str, str]:
     return out
 
 
+def substitute_clock_gate(text: str, prefix: str) -> str:
+    """Route Ibex's clock gate through our technology wrapper (src/pemu_cells.v):
+    the IHP integrated clock-gate cell on the ASIC, the same latch + AND as
+    prim_generic everywhere else (so the equivalence proof is unaffected)."""
+    name = f"{prefix}__prim_clock_gating"
+    m = re.search(rf"^module {name}\(.*?^endmodule\n", text, re.S | re.M)
+    assert m and text.count(f"module {name}(") == 1, "clock gate module not found"
+    wrapper = f"""module {name}(clk_i, test_en_i, en_i, clk_o);
+  input clk_i;
+  input test_en_i;
+  input en_i;
+  output clk_o;
+  // Replaced by scripts/ibex_flow.py: technology clock gate (src/pemu_cells.v)
+  cell_clock_gate u_cg (
+    .clk_i(clk_i),
+    .en_i(en_i),
+    .test_en_i(test_en_i),
+    .clk_o(clk_o)
+  );
+endmodule
+"""
+    return text[:m.start()] + wrapper + text[m.end():]
+
+
 def convert(cfg: str) -> Path:
     prefix = f"ibex_{cfg}"
     il = OUT / f"{prefix}.il"
@@ -115,6 +139,7 @@ write_rtlil {il.relative_to(ROOT)}
           + "".join(f"chtype -map {old} {new}\nrename {old} {new}\n" for old, new in renames.items())
           + f"hierarchy -top {prefix}_top\ncheck -assert\n"
           + f"write_verilog -noattr {tmp.relative_to(ROOT)}\n", f"convert_{cfg}_2")
+    body = substitute_clock_gate(tmp.read_text(), prefix)
     params = ", ".join(f"{k}={v}" for k, v in CONFIGS[cfg].items())
     header = f"""// Ibex ({cfg}) converted to plain Verilog. GENERATED FILE, DO NOT EDIT.
 //
@@ -122,9 +147,9 @@ write_rtlil {il.relative_to(ROOT)}
 // Top:        ibex_top, renamed {prefix}_top; submodules {prefix}__*
 // Parameters: {params}; all others at their defaults
 // Generator:  scripts/ibex_flow.py convert {cfg}   (yosys-slang, hierarchy kept)
-// Proof:      scripts/ibex_flow.py equiv {cfg}     (formal equivalence with the SV sources)
+// Proof:      scripts/ibex_flow.py equiv {cfg}     (formal equivalence with the SV sources)\n// Needs:      src/pemu_cells.v (cell_clock_gate replaces prim_clock_gating's latch + AND)
 """
-    dst.write_text(header + tmp.read_text())
+    dst.write_text(header + body)
     n = sum(1 for l in dst.read_text().splitlines() if l.startswith("module "))
     print(f"wrote {dst.relative_to(ROOT)}: {n} modules, {dst.stat().st_size // 1024} KiB")
     return dst
@@ -144,8 +169,9 @@ async2sync
 rename ibex_top gold
 design -stash gold
 
-# gate: the committed plain-Verilog conversion, read by Yosys's own frontend
-read_verilog {src}
+# gate: the committed plain-Verilog conversion, read by Yosys's own frontend,
+# with the generic (non-ASIC) build of the clock-gate wrapper
+read_verilog {src} src/pemu_cells.v
 hierarchy -top {prefix}_top
 proc
 flatten

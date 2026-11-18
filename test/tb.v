@@ -9,7 +9,13 @@ module tb ();
   // Dump the signals to a FST file. You can view it with gtkwave or surfer.
   initial begin
     $dumpfile("tb.fst");
+    // Top-level pins only: a full dump with Ibex inside is slow and huge.
+    // Set WAVES_ALL to dump the whole hierarchy when debugging.
+`ifdef WAVES_ALL
     $dumpvars(0, tb);
+`else
+    $dumpvars(1, tb);
+`endif
     #1;
   end
 
