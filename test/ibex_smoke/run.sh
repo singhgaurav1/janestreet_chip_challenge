@@ -3,6 +3,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 python3 gen_prog.py .
-iverilog -g2012 -o sim.vvp tb_ibex_smoke.v ../../src/ibex_small.v
+iverilog -g2012 -o sim.vvp tb_ibex_smoke.v ../../src/ibex_small.v ../../src/pemu_cells.v
 vvp -n sim.vvp | tee sim.log
 grep -q "^PASS" sim.log

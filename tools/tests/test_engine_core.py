@@ -5,7 +5,7 @@ contract the RTL lockstep tests inherit.
 """
 import pytest
 
-from helpers import PEBlock, capture, drain, load_engine, pad_level, run
+from helpers import PEBlock, capture, drain, load_engine, pad_level, run, run_drain
 from peemu import OWNER_CPU, assemble_one, crc, isa
 
 
@@ -127,7 +127,7 @@ def test_out_stalls_when_fifo_empty_and_in_stalls_when_full():
     assert e.stalled and e.pc == 0
     blk, e = setup("in null, 32\n", autopush=1, push_thresh=32)
     run(blk, 10)
-    assert len(e.rxf) == 4 and e.stalled
+    assert len(e.rxf) == e.depth and e.stalled
 
 
 def test_push_pull_nonblocking():
@@ -136,14 +136,13 @@ def test_push_pull_nonblocking():
     assert drain(e) == [7]   # empty FIFO: OSR <- X
     blk, e = setup("set x, 1\nl: mov isr, x\n push noblock\n jmp l\n")
     run(blk, 40)
-    assert len(e.rxf) == 4   # full FIFO drops
+    assert len(e.rxf) == e.depth   # full FIFO drops
 
 
 def test_mov_ops():
     blk, e = setup("set x, 1\n mov isr, ~x\n push\n mov isr, ::x\n push\n mov isr, ~::x\n push\n"
                    "mov y, status\n mov isr, y\n push\nh: jmp h\n")
-    run(blk, 12)
-    out = drain(e)
+    out = run_drain(blk, e, 12)
     assert out[:3] == [0xFFFFFFFE, 0x80000000, 0x7FFFFFFF]
     assert out[3] & 0b100 == 0b100   # tx fifo empty bit
 
@@ -273,11 +272,13 @@ def test_timestamper_records_changes():
     blk, e = setup("h: jmp h\n", stamp_en=1, stamp_count=2, in_base=0)
     edges = {5: 1, 25: 3, 26: 2}
     v = 0
+    got = []
     for c in range(40):
         v = edges.get(c, v)
         blk.ui_in = v
         blk.step()
-    recs = [(r >> 16, r & 0xFFFF) for r in drain(e)]
+        got += drain(e)
+    recs = [(r >> 16, r & 0xFFFF) for r in got]
     # first record = initial state; then deltas between observed changes
     assert recs == [(0, 0), (7, 1), (20, 3), (1, 2)]
 
@@ -307,10 +308,12 @@ def test_crc_catalogue_via_engine():
         p = int(f"{poly:0{w}b}"[::-1], 2) if reflect else poly
         blk, e = setup(src, own=(), autopull=1, out_base=24, crc_width=w, crc_poly=p,
                        crc_reflect=int(reflect), crc_init_ones=int(init != 0))
-        for x in [len(bits) - 1] + words:
-            assert e.tx_push(x)
-        run(blk, 200)
-        assert drain(e)[0] ^ xorout == check, name
+        pend = [len(bits) - 1] + words              # fed as the 2-deep TX FIFO drains
+        for _ in range(200):
+            if pend and e.tx_push(pend[0]):
+                pend.pop(0)
+            blk.step()
+        assert not pend and drain(e)[0] ^ xorout == check, name
 
 
 def test_stuffer_inserts_stuff_bits():
@@ -357,3 +360,10 @@ def test_autosync_snap_cases(sp, pad_edge, expect):
             ticks.append(c)
             last = e.ticks
     assert [t for t in ticks if t >= expect[0]][:len(expect)] == expect
+
+
+def test_timestamper_drops_record_when_program_pushes_same_cycle():
+    blk, e = setup("l: push noblock\n jmp l\n", stamp_en=1, stamp_count=1, in_base=0)
+    # first stamp (initial state) coincides with the first push in cycle 0
+    blk.step()
+    assert len(e.rxf) == 1 and e.ovf == 1

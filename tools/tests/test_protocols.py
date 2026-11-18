@@ -282,13 +282,14 @@ def run_bitstream(data: bytes, loopback=False, corrupt_at=None):
         c = crc.crc_bytes(data, 16, 0x8005, 0xFFFF, True, True, 0xFFFF)
         res = crc.residue(16, 0x8005, 0xFFFF, crc.bits_lsb_first(data),
                           [(c >> k) & 1 for k in range(16)], reflect=True)
-        for w in (nbits - 1, 0x80 << 24, res):
-            rx.tx_push(w)
+        rx_pend = [nbits - 1, 0x80 << 24, res]   # fed as the 2-deep TX FIFO drains
     pend = frame_words(data)
     dp, dm, out = [], [], []
     for cyc in range(40 * (8 * len(data) * 7 // 6 + 60)):
         if pend and blk.engines[0].tx_push(pend[0]):
             pend.pop(0)
+        if loopback and rx_pend and rx.tx_push(rx_pend[0]):
+            rx_pend.pop(0)
         if loopback and cyc == 20:
             rx.enabled = True
         v = lvl(blk, 16)

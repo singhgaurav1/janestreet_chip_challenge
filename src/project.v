@@ -1,27 +1,39 @@
 /*
- * Copyright (c) 2024 Your Name
+ * Copyright (c) 2026 singhgaurav1
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Tiny Tapeout wrapper: pin assignment only (docs/soc.md).
+ *   ui_in[7]  host SCK      ui_in[6]  host CS_N     ui_in[5]  host MOSI
+ *   uo_out[7] host MISO     uo_out[6:0] GPIO        uio[7:0]  GPIO (bidirectional)
+ * The remaining ui_in pins are general inputs. The host pins move onto the
+ * pin crossbar when the Protocol Engines are added.
  */
-
 `default_nettype none
 
 module tt_um_singhgaurav1_protoemu (
-    input  wire [7:0] ui_in,    // Dedicated inputs
-    output wire [7:0] uo_out,   // Dedicated outputs
-    input  wire [7:0] uio_in,   // IOs: Input path
-    output wire [7:0] uio_out,  // IOs: Output path
-    output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire       ena,      // always 1 when the design is powered, so you can ignore it
-    input  wire       clk,      // clock
-    input  wire       rst_n     // reset_n - low to reset
+    input  wire [7:0] ui_in,
+    output wire [7:0] uo_out,
+    input  wire [7:0] uio_in,
+    output wire [7:0] uio_out,
+    output wire [7:0] uio_oe,
+    input  wire       ena,      // always 1 when powered
+    input  wire       clk,
+    input  wire       rst_n
 );
+  wire sys_rst_n;
+  pemu_reset_sync u_rst (.clk(clk), .rst_n_async(rst_n), .rst_n(sys_rst_n));
 
-  // All output pins must be assigned. If not used, assign to 0.
-  assign uo_out  = ui_in + uio_in;  // Example: ou_out is the sum of ui_in and uio_in
-  assign uio_out = 0;
-  assign uio_oe  = 0;
+  wire       host_miso;
+  wire [6:0] gpio_out;
 
-  // List all unused inputs to prevent warnings
-  wire _unused = &{ena, clk, rst_n, 1'b0};
+  pemu_soc u_soc (
+      .clk(clk), .rst_n(sys_rst_n),
+      .host_sck(ui_in[7]), .host_cs_n(ui_in[6]), .host_mosi(ui_in[5]), .host_miso(host_miso),
+      .ui_in(ui_in), .uio_in(uio_in),
+      .gpio_out(gpio_out), .uio_out(uio_out), .uio_oe(uio_oe)
+  );
 
+  assign uo_out = {host_miso, gpio_out};
+
+  wire _unused = ena;
 endmodule

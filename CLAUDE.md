@@ -25,7 +25,12 @@ Architecture plan (source of decisions): https://claude.ai/artifact/VHZMwCqiHRDP
 - Clean TT precheck is mandatory. Gate-level simulation strongly recommended.
 
 ## Layout
-- `src/` TT design sources (top: `tt_um_singhgaurav1_protoemu`), `src/config.json` LibreLane config
+- `src/` TT design sources (top: `tt_um_singhgaurav1_protoemu` -> `pemu_soc`), `src/config.json`
+  LibreLane config (60 MHz, SRAM macro). Architecture/address map/host protocol: `docs/soc.md`
+- `src/pemu_cells.v` technology wrappers; all library-cell use goes through it (`PROTOEMU_ASIC`)
+- `firmware/` RV32IMC C firmware (Zig clang; `python3 firmware/build.py`); images in `firmware/images/`
+- `librelane_plugin_sram_pdn.py`, `odb_stripes.py`, `src/pdn_cfg.tcl`: SRAM power hookup (from
+  TinyTapeout/ttihp-cmos5l-sram-example); `test/sram_model/` IHP SRAM behavioural model
 - `test/` cocotb tests (TT template)
 - `syn/ibex/` Ibex area check (`synth_ibex.sh micro|emc|small`)
 - `scripts/fetch_deps.sh` pinned Ibex + IHP PDK into `deps/` (git-ignored)
@@ -34,6 +39,7 @@ Architecture plan (source of decisions): https://claude.ai/artifact/VHZMwCqiHRDP
 - `examples/pe/` PE assembly examples
 
 ## Tools
+Firmware: `pip install -r firmware/requirements.txt` (ziglang). Lint: `apt-get install verilator`.
 `pip install --break-system-packages -r syn/requirements.txt` (pinned yowasp-yosys, includes
 the slang SV frontend; use `read_slang --threads 1 --compat vcs`). The WASM Yosys can only
 open files inside the repo tree; use `syn/ibex/out/` for scratch. Icarus: `apt-get install iverilog`. GitHub release downloads are blocked from
@@ -49,9 +55,17 @@ the Claude workspace; git clones and PyPI work. Full GDS runs on GitHub Actions 
   `ibex_small_top`, `ibex_small__*`), formally equivalent to the SV sources, runs an RV32IMC
   smoke program in Icarus (`test/ibex_smoke/run.sh`). Flow: `scripts/ibex_flow.py`; CI:
   `.github/workflows/ibex.yaml`. Never edit `src/ibex_small.v` by hand; regenerate.
-- Next: top-level skeleton (Ibex + SRAM macro + bus + SPI boot bridge + one PE; map
-  `prim_clock_gating` to the IHP clock-gate cell); first full GDS run; CLOCK_PERIOD 16.67 ns;
-  then PE RTL in lockstep with the model.
+- Done: SoC skeleton (Ibex + 2 KiB SRAM macro + host SPI bridge + sysctrl/GPIO), Ibex clock
+  gate on the IHP ICG cell (re-proved), C firmware toolchain, cocotb tests through the pins
+  (`cd test && make`; GL in `gds.yaml`). Synth: 16.4k cells (0.253 mm²) + 0.080 mm² macro.
+- SRAM: CMOS5L has no SRAM in the released PDK; the TT flow's PDK aliases the SG13G2 macros
+  (`pdk_dir::libs.ref/sg13cmos5l_sram`), and TT's ttihp-cmos5l-sram-example integrates them.
+- Done: PE RTL (`src/pe_block.v`, `pe_engine.v`, `pe_fifo.v`), lockstep-equal to the model
+  (`cd test/pe && make SEEDS=0:300`). Area-reworked without ISA change: PE block 0.516 mm²
+  (`docs/area.md`). Total ~0.85 mm² vs ~0.60 mm² ceiling: owner decision pending (Ibex micro,
+  3 engines, ISA trims). Slow-corner setup fails (Ibex FF regfile read path); keep AREA synth.
+- Next: owner's area decision; integrate pe_block at 0x1000_1000; firmware drivers validating
+  every protocol on Ibex before tapeout; timing closure.
 
 ## PE toolchain rules
 - `docs/pe_isa.md` and `tools/peemu/model.py` must agree; change both plus a test.

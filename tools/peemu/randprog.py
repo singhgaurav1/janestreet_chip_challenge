@@ -50,12 +50,26 @@ def random_instr(rnd: random.Random, length: int, side: isa.SideCfg) -> int:
     return w | side.pack(sv, dl) << 8
 
 
-def random_engine(rnd: random.Random, length: int | None = None, origin: int = 0):
-    """Return (code, EngineConfig) for a random but legal program."""
+def random_engine(rnd: random.Random, length: int | None = None, origin: int = 0,
+                  serial: bool = False):
+    """Return (code, EngineConfig) for a random but legal program.
+
+    serial=True biases toward the serial assists: the program starts by
+    enabling CRC, stuffer and line coder, and most instructions move bits
+    through `out bit` / `in bit`, so stuff-bit insertion, removal and stuff
+    errors actually occur."""
     length = length or rnd.randint(2, isa.PROG_MAX)
     sc = rnd.randrange(4)
     side = isa.SideCfg(sc, opt=bool(sc) and rnd.random() < 0.5, pindirs=rnd.random() < 0.2)
     code = [random_instr(rnd, length, side) for _ in range(length)]
+    if serial:
+        for k in range(1, length):
+            r = rnd.random()
+            if r < 0.35:
+                code[k] = isa.e_out(7, 1)
+            elif r < 0.6:
+                code[k] = isa.e_in(4, 1)
+        code[0] = isa.e_ctl(1, 7)                   # assist on crc, stuff, coder
     wb = rnd.randrange(length)
     cfg = EngineConfig(
         clkdiv_int=rnd.choice([1, 1, 2, 3, 7]), clkdiv_frac=rnd.choice([0, 0, 64, 200]),
@@ -63,12 +77,13 @@ def random_engine(rnd: random.Random, length: int | None = None, origin: int = 0
         filter=rnd.randrange(2), sync_edge=rnd.randrange(3), autosync=rnd.randrange(2),
         side_count=side.count, side_opt=int(side.opt), side_pindirs=int(side.pindirs), origin=origin,
         in_shift_right=rnd.randrange(2), out_shift_right=rnd.randrange(2),
-        autopush=rnd.randrange(2), autopull=rnd.randrange(2),
+        autopush=rnd.randrange(2), autopull=int(serial) or rnd.randrange(2),
         push_thresh=rnd.randint(1, 32), pull_thresh=rnd.randint(1, 32),
         out_base=rnd.randrange(32), out_count=rnd.randint(0, 32), set_base=rnd.randrange(32),
         set_count=rnd.randint(0, 5), side_base=rnd.randrange(32), in_base=rnd.randrange(32),
         coder_mode=rnd.randrange(4), coder_diff=rnd.randrange(2), coder_idle=rnd.randrange(2),
-        stuff_mode=rnd.randrange(3), stuff_n=rnd.randint(1, 8), bit_ticks=rnd.randint(1, 16),
+        stuff_mode=rnd.randrange(3), stuff_n=rnd.randint(1, 3 if serial else 8),
+        bit_ticks=rnd.randint(1, 16),
         crc_width=rnd.randint(1, 32), crc_init_ones=rnd.randrange(2), crc_reflect=rnd.randrange(2),
         stamp_en=int(rnd.random() < 0.1), stamp_count=rnd.randint(1, 16),
         crc_poly=rnd.getrandbits(32), timeout=rnd.choice([0, 0, 3, 50]), sync_phase=0)
