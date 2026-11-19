@@ -40,7 +40,7 @@ case $WHICH in
            | sed 's/PROJECT_SOURCES *=//; s/\\//g')
     CORE=()
     for f in $SRCS; do CORE+=("$ROOT/src/$f"); done
-    CORE+=("$ROOT/test/sram_model/RM_IHPSG13_1P_512x32_c2_bm_bist.v"
+    CORE+=("$ROOT/test/sram_model/RM_IHPSG13_1P_1024x32_c2_bm_bist.v"
            "$ROOT/test/sram_model/RM_IHPSG13_1P_core_behavioral_bm_bist.v")
     DEFS=(-DSIM -DFUNCTIONAL -I"$ROOT/src")
     TOP=tb_chip_fw; TBSRC=$HERE/tb_chip_fw.sv; EXE=Vtb_chip

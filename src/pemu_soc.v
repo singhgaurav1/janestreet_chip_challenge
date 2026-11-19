@@ -2,7 +2,7 @@
  * Copyright (c) 2026 singhgaurav1
  * SPDX-License-Identifier: Apache-2.0
  *
- * Protocol emulator SoC (skeleton): Ibex (RV32IMC) + 2 KiB SRAM + system
+ * Protocol emulator SoC (skeleton): Ibex (RV32IMC) + 4 KiB SRAM + system
  * control/GPIO + host SPI bridge. The Protocol Engine block attaches at
  * 0x1000_1000 in a later step. Address map and pins: docs/soc.md.
  *
@@ -85,7 +85,7 @@ module pemu_soc (
 
   // ---- bus ------------------------------------------------------------------
   wire        sram_en, sram_we;
-  wire [8:0]  sram_addr;
+  wire [9:0]  sram_addr;
   wire [3:0]  sram_be;
   wire [31:0] sram_wdata, sram_rdata;
   wire        per_en, per_we;
@@ -93,7 +93,7 @@ module pemu_soc (
   wire [3:0]  per_be;
   wire [31:0] per_wdata, per_rdata;
 
-  pemu_bus #(.SRAM_AW(9)) u_bus (
+  pemu_bus #(.SRAM_AW(10)) u_bus (
       .clk(clk), .rst_n(rst_n),
       .m0_req(h_req), .m0_addr(h_addr), .m0_we(h_we), .m0_be(4'hF), .m0_wdata(h_wdata),
       .m0_gnt(h_gnt), .m0_rvalid(h_rvalid), .m0_err(h_err), .m0_rdata(h_rdata),

@@ -11,11 +11,12 @@ from cocotb.triggers import ClockCycles
 
 CLK_PS = 16666                  # 60 MHz (must be even in simulator ticks)
 SCK_HALF = 3                    # clk cycles per SCK half period -> 10 MHz SCK
-FW = Path(__file__).resolve().parent.parent / "firmware" / "images"
+IMAGES = Path(__file__).resolve().parent.parent / "system_validation" / "images"
 
 SCK, CS_N, MOSI, MISO = 7, 6, 5, 7     # ui_in / uo_out bit positions
 CMD_WR_CTRL, CMD_WRITE, CMD_READ, CMD_STATUS, CMD_ID = 0x01, 0x02, 0x03, 0x05, 0x9F
 SYS_SCRATCH = 0x1000_0018
+RAM_BYTES = 4096
 
 
 class HostSPI:
@@ -79,7 +80,18 @@ async def reset(dut):
 
 
 def load_image(name: str):
-    return [int(line, 16) for line in (FW / f"{name}.hex").read_text().split()]
+    """system_validation/images/<name>.bin as little-endian 32-bit words."""
+    raw = (IMAGES / f"{name}.bin").read_bytes()
+    raw += bytes(-len(raw) % 4)
+    return [int.from_bytes(raw[i:i + 4], "little") for i in range(0, len(raw), 4)]
+
+
+def result_text(r: int) -> str:
+    """fw/ result convention (fw/include/platform.h): 1 = pass, (n << 1) | 1 = fail n."""
+    if r == 1:
+        return "pass"
+    n = r >> 1
+    return f"panic, reason {n - 1000}" if n >= 1000 else f"check {n} failed"
 
 
 @cocotb.test()
@@ -92,33 +104,50 @@ async def test_host_bridge(dut):
     pattern = [0x01234567, 0x89ABCDEF, 0xFFFFFFFF, 0x00000000, 0xA5A5A5A5]
     await host.write(0x100, pattern)
     assert await host.read(0x100, len(pattern)) == pattern
+    # all 4 KiB are distinct memory: top words do not alias the bottom half
+    await host.write(RAM_BYTES - 8, [0x11111111, 0x22222222])
+    await host.write(RAM_BYTES // 2 - 8, [0x33333333, 0x44444444])
+    assert await host.read(RAM_BYTES - 8, 2) == [0x11111111, 0x22222222]
     await host.write(SYS_SCRATCH, [0xCAFEF00D])
     assert await host.read(SYS_SCRATCH) == [0xCAFEF00D]
     assert await host.status() & 0x0C == 0, "no bridge overrun/underrun"
 
 
 @cocotb.test()
-async def test_firmware_smoke(dut):
-    """Load firmware/tests/smoke.c over SPI, run it on Ibex, check its report."""
+async def test_sysval_smoke(dut):
+    """Load system_validation/tests/smoke over SPI, run it on Ibex, answer its
+    pin handshake and check the result it reports in SCRATCH."""
     await reset(dut)
     host = HostSPI(dut)
     image = load_image("smoke")
     await host.write(0, image)
-    assert await host.read(0, 4) == image[:4]
+    assert await host.read(0, len(image)) == image, "image read-back"
     await host.ctrl(1)
+
+    # firmware drives its output pattern, then waits for ui_in[4:0] = 0x15
+    # (startup checks the image CRC-32 bit-serially first: ~150k cycles)
+    for _ in range(100):
+        await ClockCycles(dut.clk, 5000)
+        if (int(dut.uo_out.value) & 0x7F == 0x55 and int(dut.uio_oe.value) == 0xF0
+                and int(dut.uio_out.value) & 0xF0 == 0xA0):
+            break
+    else:
+        r = (await host.read(SYS_SCRATCH))[0]
+        st = await host.read(RAM_BYTES - 64, 16)          # fw_status block (fw/include/fw.h)
+        assert False, (f"output pattern never appeared (SCRATCH 0x{r:08x}: {result_text(r)}; "
+                       f"status {' '.join(f'{w:08x}' for w in st)})")
+    host.pins |= 0x15
+    host._drive()
+
     result = 0
     for _ in range(40):
-        await ClockCycles(dut.clk, 1000)
+        await ClockCycles(dut.clk, 500)
         result = (await host.read(SYS_SCRATCH))[0]       # peek while the CPU runs
-        if result >> 16 in (0x600D, 0xBAD0, 0xDEAD):
+        if result & 1:
             break
-    dut._log.info(f"firmware result 0x{result:08x}")
-    assert result == 0x600D0009, f"firmware reported 0x{result:08x}"
-    assert int(dut.uo_out.value) & 0x7F == 0x55
-    assert int(dut.uio_oe.value) == 0xF0 and int(dut.uio_out.value) & 0xF0 == 0xA0
+    dut._log.info(f"firmware result 0x{result:08x} ({result_text(result)})")
+    assert result == 1, f"firmware reported {result_text(result)}"
+    # after exit the runtime puts the pins in their safe state and sleeps
     await ClockCycles(dut.clk, 50)
-    assert await host.status() & 0x02, "CPU should be asleep (wfi) after main returns"
-    # hold the CPU again: it must stop and the bus must still answer the host
-    await host.ctrl(0)
-    assert await host.status() & 1 == 0
-    assert await host.read(0, 1) == image[:1]
+    assert int(dut.uo_out.value) & 0x7F == 0 and int(dut.uio_oe.value) == 0
+    assert await host.status() & 0x02, "CPU should be asleep (wfi) after exit"

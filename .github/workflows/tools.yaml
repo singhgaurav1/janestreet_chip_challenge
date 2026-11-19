@@ -2,7 +2,7 @@ name: tools
 
 on:
   push:
-    paths: ["tools/**", "examples/**", "firmware/**", "docs/pe_isa.md", "src/pe_*.v", "test/pe/**",
+    paths: ["tools/**", "examples/**", "system_validation/**", "fw/**", "docs/pe_isa.md", "src/pe_*.v", "test/pe/**",
             ".github/workflows/tools.yaml"]
   pull_request:
   workflow_dispatch:
@@ -23,18 +23,21 @@ jobs:
           cd tools
           for f in ../examples/pe/*.pe; do python -m peemu asm "$f" -f c > /dev/null; done
 
-  firmware:
+  system_validation:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - run: pip install -r firmware/requirements.txt
-      - name: Rebuild firmware images and check they match the committed ones
+      - name: Install the fw/ toolchain
         run: |
-          python3 firmware/build.py
-          git diff --exit-code firmware/images
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
+      - name: Rebuild system-validation images (fw/ infrastructure) and check they match
+        run: |
+          make -C system_validation
+          git diff --exit-code system_validation/images
 
   pe_lockstep:
     runs-on: ubuntu-24.04

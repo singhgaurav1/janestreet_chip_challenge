@@ -8,9 +8,9 @@ utilization. Planning ceiling: **~0.60 mm² of cells + macros**.
 | Block | Area | Source |
 |---|---|---|
 | Ibex `small` (RV32IMC) + SoC glue | 0.253 mm² | `syn/ibex/out/soc.stat` |
-| SRAM 512×32 macro | 0.080 mm² | LEF |
+| SRAM 1024×32 macro (4 KiB; was 512×32, 0.080) | 0.140 mm² | LEF 416.64 × 336.46 µm |
 | **Protocol Engine block, after rework** | **0.516 mm²** (was 0.631) | `pe_block` synthesis |
-| Total | ~0.85 mm² | does not fit |
+| Total | ~0.91 mm² | does not fit |
 
 The plan estimated 2–3k cells per engine. The verified RTL (`src/pe_engine.v`,
 lockstep-equal to the golden model) is about 11k cells per engine.

@@ -28,7 +28,9 @@ Architecture plan (source of decisions): https://claude.ai/artifact/VHZMwCqiHRDP
 - `src/` TT design sources (top: `tt_um_singhgaurav1_protoemu` -> `pemu_soc`), `src/config.json`
   LibreLane config (60 MHz, SRAM macro). Architecture/address map/host protocol: `docs/soc.md`
 - `src/pemu_cells.v` technology wrappers; all library-cell use goes through it (`PROTOEMU_ASIC`)
-- `firmware/` RV32IMC C firmware (Zig clang; `python3 firmware/build.py`); images in `firmware/images/`
+- `system_validation/` RTL-team hardware tests, built with fw/'s infrastructure
+  (`make -C system_validation`); images in `system_validation/images/` (committed, loaded by
+  `test/test.py`). See its README for how it differs from `fw/`
 - `librelane_plugin_sram_pdn.py`, `odb_stripes.py`, `src/pdn_cfg.tcl`: SRAM power hookup (from
   TinyTapeout/ttihp-cmos5l-sram-example); `test/sram_model/` IHP SRAM behavioural model
 - `test/` cocotb tests (TT template)
@@ -42,7 +44,7 @@ Architecture plan (source of decisions): https://claude.ai/artifact/VHZMwCqiHRDP
   chip with an RP2350 loader model on the SPI pins); everything runs with `fw/ci.sh`
 
 ## Tools
-Firmware: `pip install -r firmware/requirements.txt` (ziglang). Lint: `apt-get install verilator`.
+Firmware: `apt-get install gcc-riscv64-unknown-elf` (GCC 13.2). Lint: `apt-get install verilator`.
 `pip install --break-system-packages -r syn/requirements.txt` (pinned yowasp-yosys, includes
 the slang SV frontend; use `read_slang --threads 1 --compat vcs`). The WASM Yosys can only
 open files inside the repo tree; use `syn/ibex/out/` for scratch. Icarus: `apt-get install iverilog`. GitHub release downloads are blocked from
@@ -58,9 +60,9 @@ the Claude workspace; git clones and PyPI work. Full GDS runs on GitHub Actions 
   `ibex_small_top`, `ibex_small__*`), formally equivalent to the SV sources, runs an RV32IMC
   smoke program in Icarus (`test/ibex_smoke/run.sh`). Flow: `scripts/ibex_flow.py`; CI:
   `.github/workflows/ibex.yaml`. Never edit `src/ibex_small.v` by hand; regenerate.
-- Done: SoC skeleton (Ibex + 2 KiB SRAM macro + host SPI bridge + sysctrl/GPIO), Ibex clock
+- Done: SoC skeleton (Ibex + 4 KiB SRAM macro (1024×32; was 2 KiB) + host SPI bridge + sysctrl/GPIO), Ibex clock
   gate on the IHP ICG cell (re-proved), C firmware toolchain, cocotb tests through the pins
-  (`cd test && make`; GL in `gds.yaml`). Synth: 16.4k cells (0.253 mm²) + 0.080 mm² macro.
+  (`cd test && make`; GL in `gds.yaml`). Synth: 16.4k cells (0.253 mm²) + 0.140 mm² macro.
 - SRAM: CMOS5L has no SRAM in the released PDK; the TT flow's PDK aliases the SG13G2 macros
   (`pdk_dir::libs.ref/sg13cmos5l_sram`), and TT's ttihp-cmos5l-sram-example integrates them.
 - Done: PE RTL (`src/pe_block.v`, `pe_engine.v`, `pe_fifo.v`), lockstep-equal to the model

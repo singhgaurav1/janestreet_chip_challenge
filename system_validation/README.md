@@ -1,0 +1,56 @@
+# System validation
+
+Small programs that run on Ibex to prove the **hardware** works: the CPU,
+memory, bus, system control, pins and, later, the Protocol Engine block.
+They are written by the RTL team and run in the chip-level cocotb tests
+(`test/test.py`), on RTL and on the gate-level netlist.
+
+## How this differs from `fw/`
+
+| | `system_validation/` (this folder) | `fw/` |
+|---|---|---|
+| Purpose | Check that the silicon behaves as designed | The firmware the chip ships with: runtime, PE driver library, protocol drivers |
+| Owner | RTL team | Firmware team |
+| Written from | The RTL and `docs/soc.md` | The specs only (`docs/pe_isa.md`, `docs/soc.md`), never the RTL, so it is an independent check on the hardware |
+| Scope | One feature per test, minimal code | Full product |
+
+Both use **the same build infrastructure**, taken from `fw/` and not
+duplicated: toolchain and compiler flags, startup code (`fw/src/start.S`),
+runtime (`fw/src/runtime.c`), linker script (`fw/link/fw.ld`), image header
+with CRC-32 (`fw/scripts/mkimage.py`) and the static stack check
+(`fw/scripts/stack_check.py`). So a validation image boots, reports and fails
+exactly like product firmware, and any change to that infrastructure is tested
+here too.
+
+This folder holds only test sources. It does not contain drivers or protocol
+code; that belongs in `fw/`.
+
+## Result convention
+
+Same as all firmware on this chip (`fw/include/platform.h`): `main` returns
+0 for pass or the number of the first failed check. The runtime writes the
+result to sysctrl `SCRATCH` (`0x1000_0018`): `1` = pass, `(n << 1) | 1` =
+failed with code `n` (panics: `n = 1000 + reason`). Then it puts the pins in
+their safe state and sleeps. The status block in the top 64 bytes of RAM has
+the details (`fw/include/fw.h`).
+
+## Build
+
+```sh
+sudo apt-get install gcc-riscv64-unknown-elf     # GCC 13.2, same as fw/
+make -C system_validation                        # all tests, chip target, 4 KiB RAM
+```
+
+`sysval.mk` is run from `fw/` and includes `fw/Makefile`, then adds one rule
+per test directory. Output goes to `build/`; the chip images are copied to
+`images/<test>.bin`, which is committed so the cocotb tests run without the
+toolchain. CI rebuilds them and fails if they differ.
+
+## Tests
+
+| Test | Checks | Run by |
+|---|---|---|
+| `tests/smoke` | sysctrl ID; `.data`/`.bss`/`.rodata` set up; recursion (stack); M extension; byte stores; cycle counter; status block at the top of the 4 KiB SRAM; output pins seen by the host, then a host answer on `ui_in[4:0]`; safe state and sleep after exit | `test/test.py::test_sysval_smoke` |
+
+Add a test: create `tests/<name>/main.c`, run `make -C system_validation`,
+then add a cocotb test in `test/test.py` that loads `images/<name>.bin`.
