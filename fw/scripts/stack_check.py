@@ -13,7 +13,7 @@ Interrupts do not nest on Ibex, so one interrupt frame is enough. The fatal
 trap handlers run on the separate panic stack, checked on its own.
 
 Fails (exit 1) if either worst case exceeds the space the linker left, or if
-a function has a dynamic stack frame or takes part in recursion: in a 2 KiB
+a function has a dynamic stack frame or takes part in recursion: in a 4 KiB
 RAM the stack must be bounded by construction.
 """
 from __future__ import annotations

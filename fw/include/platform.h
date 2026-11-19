@@ -6,7 +6,7 @@
  * lands. Nothing outside this file and pe_regs.h may hard-code an address.
  *
  * Two build targets (fw/Makefile TARGET=):
- *   chip  the SoC of docs/soc.md: 2 KiB SRAM, results to sysctrl SCRATCH
+ *   chip  the SoC of docs/soc.md: 4 KiB SRAM, results to sysctrl SCRATCH
  *   tb    the standalone-Ibex testbench (test/fw/tb_ibex_fw.sv): same map
  *         for RAM, plus the simulation-only device at 0x2000_0000 (FW_SIM)
  */
@@ -18,7 +18,7 @@
 #define FW_RAM_BASE   0x00000000u
 #endif
 #ifndef FW_RAM_SIZE
-#define FW_RAM_SIZE   2048u         /* 512x32 macro (soc.md). Aliases above 0x7FF. */
+#define FW_RAM_SIZE   4096u         /* 1024x32 macro (soc.md). Aliases above 0xFFF. */
 #endif
 
 /* ---- System control (soc.md "sysctrl registers") ---- */

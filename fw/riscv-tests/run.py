@@ -28,7 +28,7 @@ ENV = Path(__file__).resolve().parent / "env"
 TBS = {"conv": ROOT / "test" / "fw" / "obj" / "Vtb",      # src/ibex_small.v
        "ref": ROOT / "test" / "fw" / "obj" / "Vtb_ref",  # upstream SV (differential)
        "chip": ROOT / "test" / "fw" / "obj" / "Vtb_chip"}  # full chip, loaded over SPI
-CHIP_RAM = 2048
+CHIP_RAM = 4096
 OUT = ROOT / "fw" / "build" / "riscv-tests"
 CC = os.environ.get("RISCV_CC", "riscv64-unknown-elf-gcc")
 OBJCOPY = os.environ.get("RISCV_OBJCOPY", "riscv64-unknown-elf-objcopy")
@@ -58,7 +58,7 @@ def suite_tests(suite: str) -> list[str]:
 
 def build(suite: str, test: str, chip: bool = False) -> tuple[Path, int]:
     """Build one test; returns (hex image, image bytes). The standalone
-    testbenches share one image; the chip build uses link_chip.ld (2 KiB SRAM,
+    testbenches share one image; the chip build uses link_chip.ld (4 KiB SRAM,
     tohost = sysctrl SCRATCH) and raises OverflowError if it does not fit."""
     src = RT / "isa" / suite / f"{test}.S"
     out = OUT / (f"{suite}-{test}" + ("-chip" if chip else ""))

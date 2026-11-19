@@ -57,6 +57,12 @@ int main(void)
     sysctrl_uio_out(0xFF);
     sysctrl_uio_oe(0xFF);
     fw_panic(FW_PANIC_USER, 0x9100);
+#elif VARIANT == V_beyondram
+    /* Chip only: read just past the end of the SRAM. If it aliases (current
+     * docs/soc.md), word 0x84 (image magic) appears there: exit 50. Other
+     * data: exit 51. A bus error panics (EXCEPTION, mcause 5). */
+    uint32_t v = mmio_read32(FW_RAM_BASE + FW_RAM_SIZE + FW_IMAGE_HDR_OFF);
+    return v == FW_IMAGE_MAGIC ? 50 : 51;
 #else
 #error unknown VARIANT
 #endif

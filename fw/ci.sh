@@ -14,10 +14,22 @@ test/fw/build_tb.sh ref
 test/fw/build_tb.sh ref_micro
 test/fw/build_tb.sh chip
 
-step "Firmware build: chip (2 KiB, docs/soc.md) and standalone testbench; small and micro"
+step "Firmware build: chip (4 KiB, docs/soc.md) and standalone testbench; small and micro"
 for t in chip tb; do
   for a in rv32imc rv32ec; do make -C fw -j"$(nproc)" TARGET=$t ARCH=$a; done
 done
+
+step "system_validation/ (RTL chat's tests) still builds on fw/'s infrastructure"
+# Built into a scratch copy so its committed images/*.bin are never rewritten here.
+SVTMP=$(mktemp -d)
+cp -r system_validation/tests system_validation/sysval.mk "$SVTMP"/
+make -s -C fw -f "$SVTMP/sysval.mk" SV="$SVTMP" TARGET=chip RAM_SIZE=4096 sysval
+for f in "$SVTMP"/images/*.bin; do
+  n=$(basename "$f")
+  if cmp -s "$f" "system_validation/images/$n"; then echo "system_validation/images/$n: identical"
+  else echo "NOTE: system_validation/images/$n differs from a fresh build (tell the RTL chat)"; fi
+done
+rm -rf "$SVTMP"
 
 step "HAL host unit tests (ASan/UBSan) and cross-check against the golden model"
 make -C fw host-test
