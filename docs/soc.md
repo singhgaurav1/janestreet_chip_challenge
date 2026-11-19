@@ -13,7 +13,7 @@ next addition, at `0x1000_1000`.
                 cpu_run          ├──┤  bus   ├──┤  SCRATCH    │
              ┌──────┴───────┐    │  │        │  └─────────────┘
              │ Ibex RV32IMC ├────┤  │        │  ┌─────────────┐
-             │ (clock-gated)├────┘  │        ├──┤ SRAM 2 KiB  │ 0x0000_0000
+             │ (clock-gated)├────┘  │        ├──┤ SRAM 4 KiB  │ 0x0000_0000
              └──────────────┘ m1,m2 └────────┘  │ IHP macro   │
                                                 └─────────────┘
 ```
@@ -26,7 +26,7 @@ next addition, at `0x1000_1000`.
 | `pemu_soc` | Wires the blocks together |
 | `pemu_host_spi` | Host SPI target: boot loader and debug (peek/poke while running) |
 | `pemu_bus` | Interconnect, 3 masters, fixed one-cycle responses |
-| `pemu_sram` | `RM_IHPSG13_1P_512x32_c2_bm_bist`, enabled only on access |
+| `pemu_sram` | `RM_IHPSG13_1P_1024x32_c2_bm_bist` (416.64 × 336.46 µm), enabled only on access |
 | `pemu_sysctrl` | ID, GPIO, cycle counter, mailbox |
 | `ibex_small_top` (`src/ibex_small.v`) | Generated from Ibex SystemVerilog, formally equivalent |
 | `pemu_cells` | Technology wrappers: IHP integrated clock gate, synchronizers |
@@ -52,7 +52,7 @@ then CPU instruction fetch.
 
 | Address | Target | Notes |
 |---|---|---|
-| `0x0000_0000` – `0x0FFF_FFFF` | SRAM | 2 KiB, aliases above `0x7FF`. Vectors at `0x00`, reset at `0x80` |
+| `0x0000_0000` – `0x0FFF_FFFF` | SRAM | 4 KiB, aliases above `0xFFF`. Vectors at `0x00`, reset at `0x80` |
 | `0x1000_0000` | sysctrl | 4 KiB window |
 | `0x1000_1000` | Protocol Engines | next step |
 | other | none | granted, returns `err` |
@@ -90,21 +90,28 @@ follow (cannot happen at the specified SCK).
 
 ## Firmware
 
-`firmware/` builds RV32IMC C programs with Zig's bundled clang
-(`pip install -r firmware/requirements.txt`, `python3 firmware/build.py`).
+Two trees share one build infrastructure (toolchain, startup, runtime,
+linker script, image format) from `fw/`:
 
-- **Layout:** `crt0.S` holds the vector table at `0x00` and the reset entry
-  at `0x80`. It zeroes `.bss`, calls `main`, writes the return value to
-  SCRATCH, then sleeps. Traps write `0xDEAD0000 | mcause` to SCRATCH.
-- **Images:** `firmware/images/*.hex` is committed (one word per line from
-  address 0). CI rebuilds the images and fails if they differ.
+- `fw/`: the product firmware (runtime, PE HAL, protocol drivers), written
+  from the specs only. See `fw/README.md`.
+- `system_validation/`: the RTL team's hardware validation programs, built
+  with `fw/`'s infrastructure. See `system_validation/README.md`.
+
+- **Image:** loaded at `0x0`; vectors at `0x00`, reset jump at `0x80`,
+  header (magic, length, CRC-32) at `0x84`. Startup refuses a corrupted
+  image or a restart without a reload.
+- **Result convention** (one for every image): the runtime writes SCRATCH
+  `1` = pass, `(n << 1) | 1` = failed with code `n` (panics: `n = 1000 +
+  reason`). The status block (`fw_status`, `fw/include/fw.h`) occupies the
+  top 64 bytes of RAM and is host-readable at any time.
 
 ## Verification
 
 | Test | What |
 |---|---|
 | `test/test.py::test_host_bridge` | ID, status, SRAM and register write/read through the real SPI pins |
-| `test/test.py::test_firmware_smoke` | Load `smoke.c` over SPI, run it: CPU, memory sections, M extension, byte stores, peripherals, sleep, re-hold |
+| `test/test.py::test_sysval_smoke` | Load `system_validation/tests/smoke` over SPI, run it: CPU, memory sections, M extension, byte stores, peripherals, 4 KiB status block, pin handshake both ways, safe state and sleep after exit |
 | `test/ibex_smoke` | Hand-encoded program on the converted Ibex alone |
 | `scripts/ibex_flow.py equiv` | Formal equivalence of the converted Ibex |
 

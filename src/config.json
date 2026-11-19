@@ -37,23 +37,23 @@
   "//": "Technology cells (IHP clock gate) in src/pemu_cells.v",
   "VERILOG_DEFINES": ["PROTOEMU_ASIC"],
 
-  "//": "IHP SRAM macro (2 KiB firmware memory), integrated as in TinyTapeout/ttihp-cmos5l-sram-example:",
+  "//": "IHP SRAM macro (4 KiB firmware memory), integrated as in TinyTapeout/ttihp-cmos5l-sram-example:",
   "//": "Project.ExtendPowerStripes (librelane_plugin_sram_pdn.py) powers the macro after PDN generation.",
   "meta": {
     "flow": "Classic",
     "substituting_steps": { "+OpenROAD.GeneratePDN": "Project.ExtendPowerStripes" }
   },
   "MACROS": {
-    "RM_IHPSG13_1P_512x32_c2_bm_bist": {
+    "RM_IHPSG13_1P_1024x32_c2_bm_bist": {
       "instances": {
         "u_soc.u_sram.u_mem": { "location": [3.36, 3.78], "orientation": "FS" }
       },
-      "gds": ["pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_512x32_c2_bm_bist.gds"],
-      "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_512x32_c2_bm_bist.lef"],
+      "gds": ["pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_1024x32_c2_bm_bist.gds"],
+      "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_1024x32_c2_bm_bist.lef"],
       "lib": {
-        "*_typ_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_typ_1p20V_25C.lib"],
-        "*_fast_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_fast_1p32V_m55C.lib"],
-        "*_slow_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_slow_1p08V_125C.lib"]
+        "*_typ_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_1024x32_c2_bm_bist_typ_1p20V_25C.lib"],
+        "*_fast_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_1024x32_c2_bm_bist_fast_1p32V_m55C.lib"],
+        "*_slow_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_1024x32_c2_bm_bist_slow_1p08V_125C.lib"]
       }
     }
   },

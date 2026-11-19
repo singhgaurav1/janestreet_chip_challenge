@@ -5,7 +5,7 @@ This file is used to generate the project datasheet.
 ## How it works
 
 A reprogrammable protocol emulator. A RISC-V CPU (lowRISC Ibex, RV32IMC) runs
-firmware from a 2 KiB on-chip SRAM. Four cycle-exact Protocol Engines (being
+firmware from a 4 KiB on-chip SRAM. Four cycle-exact Protocol Engines (being
 added) drive the pins; this build contains the CPU, memory, system control and
 the host interface.
 
@@ -30,11 +30,12 @@ Memory map: SRAM at `0x0000_0000` (reset vector `0x80`), system control at
 ## How to test
 
 1. Hold the CPU (it is held after reset) and read the ID with command `0x9F`.
-2. Write a firmware image (`firmware/images/*.hex`, one word per line from
-   address 0) with command `0x02` at address 0.
+2. Write a firmware image (`system_validation/images/*.bin`, little-endian,
+   from address 0) with command `0x02` at address 0.
 3. Send `0x01 0x01` to start the CPU.
-4. `firmware/images/smoke.hex` sets `uo_out[6:0]` to `0x55`, drives `uio[7:4]`
-   with `0xA` and writes `0x600D0009` to SCRATCH (`0x1000_0018`) on success.
+4. `smoke.bin` sets `uo_out[6:0]` to `0x55` and drives `uio[7:4]` with `0xA`,
+   then waits for `ui_in[4:0] = 0x15`. It writes `1` to SCRATCH
+   (`0x1000_0018`) on success, `(n << 1) | 1` if check `n` failed.
 
 ## External hardware
 
