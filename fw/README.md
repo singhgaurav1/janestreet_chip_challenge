@@ -7,13 +7,17 @@ it is an independent check on the hardware.
 
 Status:
 - **F2 firmware base: done.**
-- **F1/F3 firmware side: running on the full chip** (`soc-skeleton`, docs/soc.md).
-  Images are loaded through the real host SPI pins by an RP2350 loader model:
-  riscv-tests 61 pass, 2 expected fail, 4 too big for 2 KiB; 14 runtime and
-  boot tests pass across power-up seeds.
-- **Not yet:** the PE block is not in the SoC, its shared-block offsets are
-  still stubs, and the PE HAL (~1.75 KiB) does not fit the chip's 2 KiB RAM
-  (see "Code size").
+- **F1/F3 firmware side: running on the full chip** (`docs/soc.md`, 4 KiB
+  SRAM). Images are loaded through the real host SPI pins by an RP2350 loader
+  model: riscv-tests 63 pass, 2 expected fail, 2 too big; 16 runtime, boot and
+  bridge tests pass across power-up seeds.
+- **Shared infrastructure:** `system_validation/` (the RTL chat's hardware
+  tests) builds by including `fw/Makefile`. Keep the variable names it uses
+  (`RT_SRC`, `CFLAGS`, `LDFLAGS`, `LIBS`, `CROSS`, `NM`, `OBJCOPY`, `PYTHON`,
+  `TARGET`, `ARCH`, `RAM_SIZE`) stable. `fw/ci.sh` checks that it still
+  builds and reproduces its committed image.
+- **Not yet:** the PE block is not attached in the SoC (shared-block
+  offsets are still stubs), so the HAL has only run against a register sink.
 
 ## Quick start
 
@@ -32,7 +36,7 @@ Two build targets:
 
 | `TARGET` | For | RAM | Result reported via |
 |---|---|---|---|
-| `chip` (default) | the SoC of `docs/soc.md` | 2 KiB | sysctrl `SCRATCH`, polled by the host |
+| `chip` (default) | the SoC of `docs/soc.md` | 4 KiB | sysctrl `SCRATCH`, polled by the host |
 | `tb` | the standalone-Ibex testbench | 4 KiB | the testbench's `tohost` device |
 
 ## Layout
@@ -53,7 +57,8 @@ Two build targets:
 | `apps/selftest` | Runtime self-test (startup, counters, M extension, CRC, interrupts) |
 | `apps/crashtest` | One image per failure mode (fault injection) |
 | `apps/halpanic` | HAL on the real core, then a panic; checks the bus write sequence (tb) |
-| `apps/chiptest` | Chip self-test: sysctrl ID, cycle counter vs `mcycle`, GPIO through the pins, SRAM alias, pins released at exit |
+| `apps/chiptest` | Chip self-test: sysctrl ID, cycle counter vs `mcycle`, GPIO through the pins, pins released at exit |
+| `apps/bridgetest` | Host bridge while the CPU runs: peek/poke, junk frames, CPU loads under bridge traffic |
 | `tests/host/` | HAL unit tests with a recording MMIO mock |
 | `tests/test_hal_crosscheck.py` | C HAL packing vs the golden model's packing |
 | `tests/run_fw_tests.py` | Runs the apps on the testbench; checks exit codes and the status block |
@@ -151,12 +156,11 @@ Measured, rv32imc, `-Os`:
 | Status block + panic stack | 192 |
 | Stack | computed per image, typically 80–370 B incl. one interrupt frame |
 
-- **Chip (2 KiB, as built):** runtime-only images fit with a few hundred
-  bytes to spare (`chiptest`: 1,540 B image, 176 B stack). **Runtime plus
-  PE HAL is ~3.1 KB and does not fit.** No protocol firmware can run on
-  a 2 KiB chip with this HAL; see `fw/QUESTIONS.md` A1.
-- **4 KiB:** runtime plus HAL leaves ~400 B for drivers and PE program
-  arrays.
+- **Chip (4 KiB):** runtime plus PE HAL is ~3.1 KB, leaving ~400 B (after
+  bss, status block and a typical stack) for protocol drivers and PE program
+  arrays. That is tight for F4; drivers will need to be lean, and images are
+  per scenario (the chip is reloaded for each use).
+- At 2 KiB (before PR #3) the HAL did not fit at all.
 - The stack is checked statically. `scripts/stack_check.py` adds up the
   deepest call path from `_start`, then one interrupt frame plus the deepest
   possible handler (interrupts don't nest on Ibex), plus a 32 B margin, and
@@ -178,8 +182,8 @@ Measured, rv32imc, `-Os`:
 | Same on upstream Ibex SV (`--tb both`) | Conversion check with an independent frontend | identical results **and cycle counts**, 67/67 |
 | Same with 30% random stalls and single-port RAM | Bus robustness (the chip's SRAM is single-port) | 67/67 as expected |
 | `run_fw_tests.py` (16 cases) on conv, ref, ref_micro (rv32ec) | Startup, interrupts, all panic paths, corrupted, truncated and dirty images, HAL write sequence | 16/16 each |
-| riscv-tests on the **full chip**, each loaded over the SPI pins | Boot path + ISA on the real SoC | 61 pass, 2 expected fail, 4 skipped (over 2 KiB) |
-| `run_fw_tests.py --tb chip` (14 cases), 3 power-up seeds | Chip self-test and GPIO through the pins, reload after re-hold, slow SCK, bus errors from the interconnect, restart without reload (`CTRL.run` 0→1), restart during boot, corrupted and truncated loads, pins released after a panic | 14/14 each |
+| riscv-tests on the **full chip**, each loaded over the SPI pins | Boot path + ISA on the real SoC | 63 pass, 2 expected fail, 2 skipped (over 4 KiB) |
+| `run_fw_tests.py --tb chip` (16 cases), 3 power-up seeds | Chip self-test and GPIO through the pins, reload after re-hold, slow SCK, bus errors from the interconnect, restart without reload (`CTRL.run` 0→1), restart during boot, corrupted and truncated loads, pins released after a panic, bridge peek/poke and junk frames while the CPU loads the bus, access past the end of RAM | 16/16 each |
 | `test_pe_hal` | HAL rules, every field position written out by hand from the spec | 585 checks |
 | `test_hal_crosscheck.py` | 3,000 random configurations and 308 divider rates vs the golden model | identical |
 
@@ -192,7 +196,7 @@ reset edge (see `test/fw/README.md` for why that matters).
   cycles (1.5 µs at 60 MHz). Per-byte interrupts cannot meet the F5 budget
   of one byte per ~40 cycles; full-speed data paths must use polling or FIFO
   batching.
-- Boot CRC check: ~35 cycles/byte (about 1.2 ms for a full 2 KiB image).
+- Boot CRC check: ~35 cycles/byte (about 2.4 ms for a full 4 KiB image).
 - Chip boot over SPI at 10 MHz: loading plus read-back verify of a 1.5 KiB
   image takes ~180k cycles (3 ms); the firmware's own checks then take ~45k.
 

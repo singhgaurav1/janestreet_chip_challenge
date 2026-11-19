@@ -23,6 +23,11 @@
 //   +poll=<n>           cycles between SCRATCH polls (default 2000)
 //   +max_cycles=<n>     timeout (default 3,000,000)
 //   +dump=<addr>        at the end, read 16 words from addr (hex) over SPI
+//   +bridge_tests       while the CPU runs (fw/apps/bridgetest): peek the
+//                       status-block heartbeat twice, send junk frames, check
+//                       the ID, record unspecified cases (aborted and
+//                       unaligned WRITE) as NOTE lines, then poke the mailbox
+//   +ram=<bytes>        SRAM size for status-block addresses (default 4096)
 //
 // Result line (same as tb_ibex_fw): SCRATCH 1 -> "PASS", odd -> "FAIL code=n"
 // (n = SCRATCH >> 1), other non-zero -> "FAIL code=-4". Loader errors are
@@ -53,8 +58,8 @@ module tb_chip_fw;
   // ---------------------------------------------------------------- options
   string img;
   int img_len = -1, load_len = -1, restart_at = -1, sck_half = 3, poll = 2000;
-  int max_cycles = 3000000, dump_addr = -1;
-  bit no_verify = 0, rerun = 0;
+  int max_cycles = 3000000, dump_addr = -1, ram = 4096;
+  bit no_verify = 0, rerun = 0, bridge_tests = 0, bridge_done = 0;
   logic [7:0] image [0:65535];
   longint cycles = 0;
   always @(posedge clk) cycles <= cycles + 1;
@@ -171,6 +176,38 @@ module tb_chip_fw;
              no_verify ? "" : " and verified", cycles);
   endtask
 
+  // Debug access while the CPU runs (fw/apps/bridgetest). Status block:
+  // heartbeat word 14, reserved (mailbox) word 15 (fw/include/fw.h).
+  task automatic bridge_sequence();
+    logic [31:0] d[$], hb1, hb2, id, st_base, w[$];
+    logic [7:0] r;
+    st_base = 32'(ram - 64);
+    cmd_read(st_base + 56, 1, d); hb1 = d[0];
+    repeat (20000) @(negedge clk);
+    cmd_read(st_base + 56, 1, d); hb2 = d[0];
+    $display("tb_chip_fw: heartbeat 0x%08x -> 0x%08x while running", hb1, hb2);
+    if (hb2 <= hb1) begin fail(-20, "heartbeat did not advance (peek while running)"); return; end
+    // Junk frames: unknown commands, then a frame aborted after 2 data bytes
+    cs_begin(); spi_byte(8'hFF, r); for (int i = 0; i < 4; i++) spi_byte(8'h00, r); cs_end();
+    cs_begin(); spi_byte(8'h00, r); for (int i = 0; i < 4; i++) spi_byte(8'hA5, r); cs_end();
+    cmd_id(id);
+    if (id !== ID_VALUE) begin fail(-21, $sformatf("ID 0x%08x after junk frames", id)); return; end
+    cs_begin(); spi_byte(8'h02, r); spi_word_out(st_base + 60); spi_byte(8'hAB, r); spi_byte(8'hCD, r);
+    cs_end();
+    cmd_read(st_base + 60, 1, d);
+    $display("NOTE aborted_write: mailbox after a WRITE cut after 2 data bytes = 0x%08x", d[0]);
+    // Unaligned WRITE address (docs/soc.md: "word writes"; alignment unspecified)
+    w = {32'h1122_3344};
+    cmd_write(st_base + 62, w);
+    cmd_read(st_base + 56, 3, d);
+    $display("NOTE unaligned_write: WRITE 0x11223344 at +62 -> words +56/+60/+64 = 0x%08x 0x%08x 0x%08x",
+             d[0], d[1], d[2]);
+    // Poke the mailbox: the firmware finishes when it sees this
+    w = {32'hC0FF_EE01};
+    cmd_write(st_base + 60, w);
+    $display("tb_chip_fw: mailbox poked, cycle %0d", cycles);
+  endtask
+
   // Run until SCRATCH is non-zero; returns it (0 on timeout).
   task automatic run_and_poll(output logic [31:0] result);
     logic [31:0] d[$];
@@ -186,6 +223,11 @@ module tb_chip_fw;
         cmd_ctrl(8'h00);
         cmd_ctrl(8'h01);
         t_next_restart = -1;
+      end
+      if (bridge_tests && !bridge_done && cycles >= t_start + 60000) begin
+        bridge_done = 1;
+        bridge_sequence();
+        if (finished) return;
       end
       cmd_read(SCRATCH, 1, d);
       if (d[0] != 0) begin
@@ -220,6 +262,8 @@ module tb_chip_fw;
     void'($value$plusargs("dump=%h", dump_addr));
     no_verify = $test$plusargs("no_verify");
     rerun = $test$plusargs("rerun");
+    bridge_tests = $test$plusargs("bridge_tests");
+    void'($value$plusargs("ram=%d", ram));
     for (int i = 0; i < 65536; i++) image[i] = 8'h00;
     $readmemh(img, image);
 

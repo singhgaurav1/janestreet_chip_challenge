@@ -8,6 +8,22 @@ specs leave a decision open, or where firmware results bear on the
 architecture. Firmware works around each one today (marked **Now**), but
 several are hardware behaviours that cannot be patched after tapeout.
 
+## Status (2026-11-19, after the owner's decisions and the RTL chat's review)
+
+| Item | Status |
+|---|---|
+| A1 SRAM size | **Resolved:** 4 KiB (PR #3) |
+| A2 bus errors | **Resolved** in `docs/soc.md`, verified on the chip |
+| A3 PE interrupts | RTL planned: event flag n → ID 16+n, per-engine FIFO IRQ → IDs 24–27 (`platform.h` already assumes 16+n) |
+| A4 FIFO edge cases | RTL planned: sticky TXF-overflow / RXF-underflow bits; HAL keeps checking levels |
+| A5 shared-block offsets, owner NONE | RTL planned |
+| A6 reset values, A7 CTRL/RESTART, A8 forced instruction | Spec text pending |
+| A9 engine ENABLE mask, A10 one-write safe state | RTL planned; HAL will use both when specified |
+| A11a reload before run | RTL planned: bridge refuses a run without a load since the last run |
+| A13 bus error above SRAM, A14 unused sysctrl offsets | RTL planned; `beyond_ram` test flips to a fault when A13 lands |
+| A12, A15, A16 | Closed (host heartbeat; `fw/` result convention adopted; shared build infrastructure) |
+| B1–B3 (new) bridge observations | Spec text requested, see section B |
+
 ## A. Decisions needed (hardware, before RTL freeze)
 
 **A1. Firmware SRAM size: 2 KiB is not viable; 4 KiB is tight.**
@@ -138,7 +154,17 @@ independence rule holds.
   the C HAL and the model pack 3,000 random configurations identically.
 - `PINCTRL.SET_COUNT` is 3 bits but only 0–5 are legal (`SET` has a 5-bit
   immediate). Fine, but worth one line in §6.
-- `STATUS` levels are 4 bits for a 4-deep FIFO; firmware assumes 0–4.
+- FIFOs are now 2 deep (`pe_isa.md` 1.1); `STATUS` levels are still 4 bits.
+  The HAL treats any level ≥ 2 as full, so a 4-bit level that ever reads
+  2–15 is never written into.
+- **B1 Aborted WRITE (observed, unspecified).** A WRITE frame cut after 2
+  of 4 data bytes leaves memory unchanged. *Please specify:* "a partial word
+  is discarded" (what the RTL does).
+- **B2 Unaligned WRITE/READ address (observed, unspecified).** A WRITE to
+  base + 2 lands on the aligned word. *Please specify:* "`addr[1:0]` are
+  ignored", or that the host must align.
+- **B3 Unknown commands (observed, unspecified).** Frames starting with
+  `0x00` or `0xFF` are ignored and the next frame works. *Please specify.*
 
 ## C. For the RTL chat (not hardware bugs)
 
