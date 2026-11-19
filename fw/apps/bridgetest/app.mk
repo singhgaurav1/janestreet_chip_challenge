@@ -1,0 +1,1 @@
+bridgetest_TARGETS := chip

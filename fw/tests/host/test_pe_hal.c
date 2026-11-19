@@ -281,11 +281,15 @@ static void test_fifos(void)
     mock_reset();
     pe_hal_init();
     uint32_t w = 0;
-    mock.status[0] = 4u << 8;                            /* TX full */
-    int n0 = mock.nlog;
-    EXPECT_EQ(pe_tx_try(0, 0xAB), (unsigned long long)PE_EAGAIN);
+    /* pe_isa.md 1.1: FIFOs are 2 x 32. TX level 2 is full. Levels above the
+     * depth cannot happen; treat them as full too (never write blind). */
+    for (uint32_t lvl = 2; lvl <= 15; lvl++) {
+        mock.status[0] = lvl << 8;
+        EXPECT_EQ(pe_tx_try(0, 0xAB), (unsigned long long)PE_EAGAIN);
+    }
     EXPECT_EQ(mock_count_writes(EB(0, 0x24)), 0);
-    mock.status[0] = 3u << 8;
+    int n0 = mock.nlog;
+    mock.status[0] = 1u << 8;
     EXPECT_EQ(pe_tx_try(0, 0xAB), PE_OK);
     EXPECT_EQ(mock_count_writes(EB(0, 0x24)), 1);
     mock.status[3] = 0;                                  /* RX empty */
@@ -300,7 +304,7 @@ static void test_fifos(void)
     (void)n0;
 
     /* blocking calls time out (cycle counter advances 10 per read) */
-    mock.status[1] = 4u << 8;
+    mock.status[1] = 2u << 8;                            /* TX full */
     uint64_t t0 = mock.cycles;
     EXPECT_EQ(pe_tx_put(1, 1, 500), (unsigned long long)PE_ETIMEDOUT);
     EXPECT(mock.cycles - t0 >= 500 && mock.cycles - t0 < 700);

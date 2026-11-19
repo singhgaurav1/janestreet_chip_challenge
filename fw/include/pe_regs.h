@@ -21,7 +21,7 @@
 
 #define PE_NUM_ENGINES    4u
 #define PE_IMEM_WORDS     64u          /* pe_isa.md 1.2 */
-#define PE_FIFO_DEPTH     4u           /* pe_isa.md 1.1: 4 x 32 each */
+#define PE_FIFO_DEPTH     2u           /* pe_isa.md 1.1: 2 x 32 each (was 4 until 2026-11-18) */
 #define PE_PC_WORDS       32u          /* PC is 5 bits (offset from ORIGIN) */
 
 #define PE_ENGINE_STRIDE  0x100u
