@@ -1,0 +1,50 @@
+name: fw
+
+# Firmware workstream: build for the chip and the standalone testbench (Ibex
+# small and micro), HAL unit tests, riscv-tests on the converted core, upstream
+# Ibex and the full chip (loaded over the host SPI pins), and the firmware
+# runtime tests on all of them. See fw/README.md.
+on:
+  push:
+    paths: ["fw/**", "test/fw/**", "src/**", "test/Makefile", "test/sram_model/**",
+            "docs/pe_isa.md", "docs/soc.md", "tools/peemu/**", "scripts/fetch_deps.sh",
+            ".github/workflows/fw.yaml"]
+  pull_request:
+    paths: ["fw/**", "test/fw/**", "src/**", "test/Makefile", "test/sram_model/**",
+            "docs/pe_isa.md", "docs/soc.md", "tools/peemu/**", "scripts/fetch_deps.sh",
+            ".github/workflows/fw.yaml"]
+  workflow_dispatch:
+
+jobs:
+  fw:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf verilator
+          riscv64-unknown-elf-gcc --version | head -1
+          verilator --version
+          pip install -r tools/requirements.txt
+      - name: Fetch pinned Ibex and riscv-tests
+        run: |
+          ./scripts/fetch_deps.sh
+          ./fw/scripts/fetch_riscv_tests.sh
+      - name: Firmware CI
+        run: ./fw/ci.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fw-images-and-logs
+          path: |
+            fw/build/*_chip/*.bin
+            fw/build/*_chip/*.hex
+            fw/build/*_chip/*.map
+            fw/build/*_tb/*.hex
+            fw/build/riscv-tests/results.*.txt
+            fw/build/tests/**/*.log
