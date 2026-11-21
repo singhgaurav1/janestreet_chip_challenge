@@ -201,7 +201,9 @@ module pe_engine #(
   );
 
   // STATUS: [4:0] PC, [5] T, [6] SERR, [7] OVF, [11:8] TX level, [15:12] RX level, [16] stalled
-  assign status = {15'h0, stalled, 1'b0, rxf_level, 1'b0, txf_level, ovf, serr, t, pc};
+  // [17] TXOVF and [18] RXUNF are added by pe_block (CPU-side errors)
+  assign status = {12'h0, force_valid, 2'b00, stalled, 1'b0, rxf_level, 1'b0, txf_level, ovf, serr,
+                   t, pc};
 
   assign imem_addr = c_origin + {1'b0, pc};
 

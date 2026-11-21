@@ -63,6 +63,7 @@ class Engine:
         self.rxf: deque[int] = deque()
         self.x = self.y = self.isr = self.osr = 0
         self.t = self.serr = self.ovf = 0
+        self.txovf = self.rxunf = 0      # sticky CPU-side FIFO errors (STATUS[17], [18])
         self.crc = 0
         self.div_cnt = self.div_acc = 0
         self.h1 = self.h2 = self.f_prev = 0
@@ -76,6 +77,9 @@ class Engine:
 
     # ---- CPU-side controls ------------------------------------------------
     def restart(self):
+        """CTRL.RESTART: PC and the in-progress shift/delay/wait/assist state.
+        Kept: FIFOs, X, Y, ISR/OSR contents, T, CRC value, error flags,
+        divider (see div_restart) and the configuration."""
         self.pc = 0
         self.isr_cnt = 0
         self.osr_cnt = 32
@@ -99,16 +103,40 @@ class Engine:
         self.cfg = cfg
 
     def tx_push(self, v: int) -> bool:
+        """CPU write to TXF: dropped when full, which sets the sticky TXOVF."""
         if len(self.txf) >= self.depth:
+            self.txovf = 1
             return False
         self.txf.append(v & M32)
         return True
 
     def rx_pop(self) -> int | None:
-        return self.rxf.popleft() if self.rxf else None
+        """CPU read of RXF: 0 when empty, which sets the sticky RXUNF."""
+        if not self.rxf:
+            self.rxunf = 1
+            return None
+        return self.rxf.popleft()
 
     def force(self, instr: int):
+        """CPU write to INSTR: replaces any forced instruction still pending."""
         self.force_instr = instr & 0xFFFF
+
+    def clear_errors(self, w1c: int):
+        """STATUS write: 1 clears SERR [6], OVF [7], TXOVF [17], RXUNF [18]."""
+        if w1c >> 6 & 1:
+            self.serr = 0
+        if w1c >> 7 & 1:
+            self.ovf = 0
+        if w1c >> 17 & 1:
+            self.txovf = 0
+        if w1c >> 18 & 1:
+            self.rxunf = 0
+
+    def status(self) -> int:
+        """STATUS register value (docs/pe_isa.md section 6)."""
+        return (self.pc | self.t << 5 | self.serr << 6 | self.ovf << 7 | len(self.txf) << 8 |
+                len(self.rxf) << 12 | int(self.stalled) << 16 | self.txovf << 17 |
+                self.rxunf << 18 | int(self.force_instr is not None) << 19)
 
     # ---- helpers ----------------------------------------------------------
     def _flag_index(self, n: int, rel: bool) -> int:
@@ -562,12 +590,14 @@ class Engine:
 class PEBlock:
     """Four engines, shared instruction memory, event flags and pad crossbar."""
 
-    def __init__(self, fifo_depth: int = 2):
+    def __init__(self, fifo_depth: int = 2, owner_reset: dict | None = None):
         self.imem = [isa.NOP] * isa.IMEM_DEPTH
         self.flags = 0
+        self.irq_en = 0            # IRQ_EN: [7:0] flags, [11:8] RX not empty, [15:12] TX not full
         self.pad_out = 0           # bits indexed by pin index (8..23 used)
         self.pad_oe = 0            # bits 8..15 used
         self.owner = {i: OWNER_NONE for i in DRIVEABLE}
+        self.owner.update(owner_reset or {})
         self.od = 0                # bits 8..15
         self.engines = [Engine(self, i, fifo_depth) for i in range(N_ENGINES)]
         self.ui_in = 0             # external pad values for the current cycle
@@ -593,9 +623,9 @@ class PEBlock:
         for p in pins:
             if p not in BIDIR:
                 raise ValueError(f"pin {p} has no output enable")
-            self.od = (self.od | 1 << p) if on else (self.od & ~(1 << p))
-            if on:   # enabling open drain presets the pad to "released"
+            if on and not self.od >> p & 1:   # newly open drain: preset to "released"
                 self.pad_out |= 1 << p
+            self.od = (self.od | 1 << p) if on else (self.od & ~(1 << p))
 
     def cpu_write_pins(self, kind: str, values: dict):
         for p, b in values.items():
@@ -605,22 +635,59 @@ class PEBlock:
     def set_flags(self, set_mask: int = 0, clr_mask: int = 0):
         self.flags = ((self.flags & ~clr_mask) | set_mask) & 0xFF
 
+    def engine_ctrl(self, w: int):
+        """ENGINE_CTRL write: [3:0] EN of every engine at once, [7:4] RESTART and
+        [11:8] DIV_RESTART (write 1) per engine, all in the same cycle."""
+        for n, e in enumerate(self.engines):
+            if w >> (4 + n) & 1:
+                e.restart()
+            if w >> (8 + n) & 1:
+                e.div_restart()
+            e.enabled = bool(w >> n & 1)
+
+    def safe_state(self):
+        """SAFE_STATE write with the key: every engine disabled, every pad not
+        owned by the system released (owner NONE). One store after a crash."""
+        for e in self.engines:
+            e.enabled = False
+        for p in DRIVEABLE:
+            if self.owner[p] != OWNER_SYS:
+                self.owner[p] = OWNER_NONE
+
+    @property
+    def irq(self) -> int:
+        """Interrupt lines: [7:0] flag n and IRQ_EN[n]; [8+n] engine n has RX data
+        (IRQ_EN[8+n]) or TX space (IRQ_EN[12+n]). Level, cleared at the source."""
+        lines = self.flags & self.irq_en & 0xFF
+        for n, e in enumerate(self.engines):
+            rx = e.rxf and self.irq_en >> (8 + n) & 1
+            tx = len(e.txf) < e.depth and self.irq_en >> (12 + n) & 1
+            lines |= int(bool(rx or tx)) << (8 + n)
+        return lines
+
     # ---- pad view ---------------------------------------------------------
+    # A pad with owner NONE (or the reserved code 6) is released: output 0,
+    # output enable off, whatever its registers hold.
+    def _released(self) -> int:
+        return sum(1 << p for p in DRIVEABLE if self.owner[p] >= 6)
+
     @property
     def uo_out(self) -> int:
-        return (self.pad_out >> 16) & 0xFF
+        return ((self.pad_out & ~self._released()) >> 16) & 0xFF
 
     @property
     def uio_oe(self) -> int:
         od = (self.od >> 8) & 0xFF
         oe = (self.pad_oe >> 8) & 0xFF
         out = (self.pad_out >> 8) & 0xFF
-        return ((oe & ~od) | (~out & od)) & 0xFF
+        rel = (self._released() >> 8) & 0xFF
+        return ((oe & ~od) | (~out & od)) & ~rel & 0xFF
 
     @property
     def uio_out(self) -> int:
         od = (self.od >> 8) & 0xFF
-        return (self.pad_out >> 8) & 0xFF & ~od
+        rel = (self._released() >> 8) & 0xFF
+        return (self.pad_out >> 8) & 0xFF & ~od & ~rel
 
     def _pad_write(self, kind: str, p: int, b: int):
         if kind == "out" and p in DRIVEABLE:

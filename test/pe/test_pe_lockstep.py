@@ -89,6 +89,7 @@ class Rig:
         # A CPU read observes the state at the start of the cycle; its side
         # effect (an RXF pop) lands at the end, after the engines' own update.
         is_read = op is not None and not op[0]
+        exp_err = op is not None and not mapped(op[1])
         expected_read, post = (model_action() if (is_read and model_action) else (None, None))
         self.m.step()
         self.trace = (self.trace + [(self.cycle, op, pre)])[-12:]
@@ -99,6 +100,10 @@ class Rig:
             model_action()
         await ReadOnly()
         self.compare()
+        if op is not None:
+            got_err = int(d.err.value)
+            assert got_err == int(exp_err), \
+                f"cycle {self.cycle}: err {got_err} for access to 0x{op[1]:03x}, expected {int(exp_err)}"
         if is_read:
             got = int(d.rdata.value)
             assert got == expected_read, \
@@ -137,11 +142,47 @@ class Rig:
         assert int(d.uo_out.value) == m.uo_out, \
             f"cycle {self.cycle} uo_out RTL {int(d.uo_out.value):02x} model {m.uo_out:02x}"
         assert int(d.uio_out.value) == m.uio_out, f"cycle {self.cycle} uio_out"
-        assert int(d.uio_oe.value) == m.uio_oe, f"cycle {self.cycle} uio_oe"
+        assert int(d.uio_oe.value) == m.uio_oe, (f"cycle {self.cycle} uio_oe RTL {int(d.uio_oe.value):02x} "
+                                                 f"model {m.uio_oe:02x} od {m.od >> 8:02x} out {m.pad_out >> 8 & 0xFF:02x} "
+                                                 f"oe {m.pad_oe >> 8:02x} own {[m.owner[p] for p in range(8, 16)]}")
+        assert int(d.irq.value) == m.irq, \
+            f"cycle {self.cycle} irq RTL {int(d.irq.value):03x} model {m.irq:03x}"
 
 
 def reg(n, name):
     return 0x100 * n + REG_OFFSETS[name]
+
+
+# shared registers (docs/pe_isa.md section 6)
+EVT, EVT_SET, EVT_CLR, IRQ_EN = 0x500, 0x504, 0x508, 0x50C
+ENGINE_CTRL, SAFE_STATE, SAFE_KEY = 0x510, 0x514, 0x5AFE
+PAD_OD, GPIO_OUT, GPIO_OE, PAD_STATE = 0x518, 0x51C, 0x520, 0x524
+GPIO_OUT_SET, GPIO_OUT_CLR, GPIO_OE_SET, GPIO_OE_CLR = 0x528, 0x52C, 0x530, 0x534
+PAD_OD_SET, PAD_OD_CLR = 0x538, 0x53C
+
+
+def pad_owner_reg(p):
+    return 0x540 + 4 * (p - 8)
+
+
+def mapped(a):
+    """Offsets the block answers without err."""
+    if a < 0x400:
+        return (a & 0xFF) <= 0x2C
+    if 0x400 <= a < 0x500:
+        return True
+    return a in (EVT, EVT_SET, EVT_CLR, IRQ_EN, ENGINE_CTRL, SAFE_STATE) or 0x518 <= a <= 0x57C
+
+
+def cpu_pads(m, kind, new):
+    """GPIO write of a full value: lands on CPU-owned pads only (model view)."""
+    width = 16 if kind == "out" else 8
+    m.cpu_write_pins(kind, {8 + i: new >> i & 1 for i in range(width)})
+
+
+def od_write(m, v):
+    m.set_od([8 + i for i in range(8) if v >> i & 1], True)
+    m.set_od([8 + i for i in range(8) if not v >> i & 1], False)
 
 
 async def setup(dut):
@@ -191,14 +232,17 @@ async def run_seed(dut, seed, cycles, serial=False):
     for i in rnd.sample(range(isa.IMEM_DEPTH), 8):
         await rig.step((0, 0x400 + 4 * i, 0), lambda w=code[i]: (w, None))
 
-    # pads: random owners and open drain
-    owners = {p: rnd.choice([0, 1, 2, 3, 4, 7]) for p in range(8, 24)}
-    lo = sum(owners[8 + i] << (3 * i) for i in range(8))
-    hi = sum(owners[16 + i] << (3 * i) for i in range(8))
-    await rig.step((1, 0x510, lo), lambda: [m.owner.__setitem__(p, owners[p]) for p in range(8, 16)])
-    await rig.step((1, 0x514, hi), lambda: [m.owner.__setitem__(p, owners[p]) for p in range(16, 24)])
+    # pads: random owners (one register per pad) and open drain
+    for p in range(8, 24):
+        o = rnd.choice([0, 1, 2, 3, 4, 6, 7])
+        await rig.step((1, pad_owner_reg(p), o), lambda p=p, o=o: m.owner.__setitem__(p, o))
+    for p in rnd.sample(range(8, 24), 4):
+        await rig.step((0, pad_owner_reg(p), 0), lambda p=p: (m.owner[p], None))
     od = rnd.getrandbits(8)
-    await rig.step((1, 0x518, od), lambda: m.set_od([8 + i for i in range(8) if od >> i & 1]))
+    await rig.step((1, PAD_OD, od), lambda: od_write(m, od))
+    irq_en = rnd.getrandbits(16)
+    await rig.step((1, IRQ_EN, irq_en), lambda: setattr(m, "irq_en", irq_en))
+    await rig.step((0, IRQ_EN, 0), lambda: (m.irq_en, None))
 
     # enable all engines
     def enable(n):
@@ -244,22 +288,75 @@ async def run_seed(dut, seed, cycles, serial=False):
         elif r < 0.39:
             await rig.step((1, reg(n, "CTRL"), 1), lambda e=e: setattr(e, "enabled", True), ui, uio)
         elif r < 0.41:
-            await rig.step((0, reg(n, "STATUS"), 0), lambda e=e: (rig_status(e), None), ui, uio)
+            await rig.step((0, reg(n, "STATUS"), 0), lambda e=e: (e.status(), None), ui, uio)
+        elif r < 0.42:
+            w = rnd.getrandbits(32)
+            await rig.step((1, reg(n, "STATUS"), w), lambda e=e, w=w: e.clear_errors(w), ui, uio)
+        elif r < 0.43:
+            await rig.step((0, reg(n, "INSTR"), 0),
+                           lambda e=e: (m.imem[(e.cfg.origin + e.pc) % 64], None), ui, uio)
+        elif r < 0.44:
+            w = rnd.getrandbits(12)
+            await rig.step((1, ENGINE_CTRL, w), lambda w=w: m.engine_ctrl(w), ui, uio)
+        elif r < 0.445:
+            await rig.step((0, ENGINE_CTRL, 0),
+                           lambda: (sum(int(x.enabled) << k for k, x in enumerate(m.engines)), None),
+                           ui, uio)
+        elif r < 0.45:
+            p, o = rnd.randrange(8, 24), rnd.choice([0, 1, 2, 3, 4, 5, 6, 7])
+            await rig.step((1, pad_owner_reg(p), o), lambda p=p, o=o: m.owner.__setitem__(p, o),
+                           ui, uio)
+        elif r < 0.47:
+            a, v = rnd.choice([(GPIO_OUT, 16), (GPIO_OUT_SET, 16), (GPIO_OUT_CLR, 16),
+                               (GPIO_OE, 8), (GPIO_OE_SET, 8), (GPIO_OE_CLR, 8)])
+            w = rnd.getrandbits(v)
+            kind = "out" if a in (GPIO_OUT, GPIO_OUT_SET, GPIO_OUT_CLR) else "oe"
+
+            def gpio(a=a, w=w, kind=kind):
+                cur = (m.pad_out >> 8 & 0xFFFF) if kind == "out" else (m.pad_oe >> 8 & 0xFF)
+                new = {GPIO_OUT: w, GPIO_OE: w, GPIO_OUT_SET: cur | w, GPIO_OE_SET: cur | w,
+                       GPIO_OUT_CLR: cur & ~w, GPIO_OE_CLR: cur & ~w}[a]
+                cpu_pads(m, kind, new)
+            await rig.step((1, a, w), gpio, ui, uio)
+        elif r < 0.475:
+            a, w = rnd.choice([PAD_OD, PAD_OD_SET, PAD_OD_CLR]), rnd.getrandbits(8)
+
+            def odw(a=a, w=w):
+                cur = m.od >> 8 & 0xFF
+                od_write(m, {PAD_OD: w, PAD_OD_SET: cur | w, PAD_OD_CLR: cur & ~w}[a])
+            await rig.step((1, a, w), odw, ui, uio)
+        elif r < 0.48:
+            a = rnd.choice([GPIO_OUT, GPIO_OE, PAD_OD, PAD_STATE, EVT, IRQ_EN])
+            val = {GPIO_OUT: lambda: m.pad_out >> 8 & 0xFFFF, GPIO_OE: lambda: m.pad_oe >> 8 & 0xFF,
+                   PAD_OD: lambda: m.od >> 8 & 0xFF, EVT: lambda: m.flags,
+                   IRQ_EN: lambda: m.irq_en,
+                   PAD_STATE: lambda: (m.pad_oe >> 8 & 0xFF) << 16 | (m.pad_out >> 8 & 0xFFFF)}[a]
+            await rig.step((0, a, 0), lambda val=val: (val(), None), ui, uio)
+        elif r < 0.483:
+            w = rnd.getrandbits(16)
+            await rig.step((1, IRQ_EN, w), lambda w=w: setattr(m, "irq_en", w), ui, uio)
+        elif r < 0.484:
+            key = SAFE_KEY if rnd.random() < 0.7 else rnd.getrandbits(16)
+            await rig.step((1, SAFE_STATE, key),
+                           (lambda: m.safe_state()) if key == SAFE_KEY else None, ui, uio)
+        elif r < 0.49:
+            a = rnd.choice([0x30, 0x0FC, 0x2F0, 0x50, 0x580, 0x600, 0xFFC, 0x7A0])
+            if a < 0x400:
+                a = 0x100 * n + (a & 0xFF)
+            we = rnd.random() < 0.5
+            await rig.step((int(we), a, rnd.getrandbits(32)),
+                           None if we else (lambda: (0, None)), ui, uio)
         else:
             await rig.step(None, None, ui, uio)
     dut._log.info(f"seed {seed}: {rig.cycle} cycles in lockstep")
 
 
 def rx_read(e):
-    """RXF read: value = head at the start of the cycle (0 if empty); pop after."""
-    if not e.rxf:
-        return 0, None
-    return e.rxf[0], e.rxf.popleft
-
-
-def rig_status(e):
-    return (e.pc | e.t << 5 | e.serr << 6 | e.ovf << 7 | len(e.txf) << 8 | len(e.rxf) << 12 |
-            int(e.stalled) << 16)
+    """RXF read: value = head at the start of the cycle (0 if empty); pop after.
+    An empty read sets RXUNF (at the end of the cycle)."""
+    if not e.rxf:     # a word the engine pushes in this same cycle is not popped
+        return 0, lambda: setattr(e, "rxunf", 1)
+    return e.rxf[0], e.rx_pop
 
 
 def seed_range():
