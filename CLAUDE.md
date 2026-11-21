@@ -67,8 +67,8 @@ the Claude workspace; git clones and PyPI work. Full GDS runs on GitHub Actions 
   (`pdk_dir::libs.ref/sg13cmos5l_sram`), and TT's ttihp-cmos5l-sram-example integrates them.
 - Done: PE RTL (`src/pe_block.v`, `pe_engine.v`, `pe_fifo.v`), lockstep-equal to the model
   (`cd test/pe && make SEEDS=0:300`). Area-reworked without ISA change: PE block 0.516 mm²
-  (`docs/area.md`). Total ~0.91 mm² vs ~0.60 mm² ceiling: owner's area decision after a working
-  chip (Ibex micro, 3 engines, ISA trims). Slow-corner setup fails (Ibex FF regfile read path).
+  (`docs/area.md`). Total ~0.91 mm²; budget 0.95 mm² (owner, 2026-11-21, for now; was ~0.60).
+  Routability unproven: the next layout run decides whether area cuts are needed. Slow-corner setup fails (Ibex FF regfile read path).
 - Done (2026-11-21): firmware-review fixes (bus errors, boot guard, register map v1 in
   `docs/pe_isa.md` 6: per-pad owners, ENGINE_CTRL, SAFE_STATE, IRQ_EN, sticky FIFO errors);
   PE block attached at 0x1000_1000, IRQs on Ibex fast IDs 16-27, pads reset to owner system.
