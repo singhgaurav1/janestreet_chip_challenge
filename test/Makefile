@@ -7,7 +7,8 @@ FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
 PROJECT_SOURCES = project.v pemu_soc.v pemu_host_spi.v pemu_bus.v pemu_sram.v \
-                  pemu_sysctrl.v pemu_cells.v ibex_small.v sram_bb.v
+                  pemu_sysctrl.v pemu_cells.v ibex_small.v sram_bb.v \
+                  pe_block.v pe_engine.v pe_fifo.v
 
 # IHP SRAM behavioural model (RTL and gate level); SIM skips the black box in sram_bb.v
 SRAM_MODEL = $(PWD)/sram_model/RM_IHPSG13_1P_1024x32_c2_bm_bist.v \
