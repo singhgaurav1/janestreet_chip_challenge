@@ -11,7 +11,9 @@
  *   0x14 CYCLE    RO  free-running cycle counter
  *   0x18 SCRATCH  RW  mailbox between firmware and the host
  * Reads return data one cycle after the access, as the bus requires.
- * Writes honour byte enables.
+ * Writes honour byte enables; writes to read-only registers are ignored.
+ * Any other offset in the 4 KiB window answers with a bus error (err, one
+ * cycle after the access, like rdata).
  */
 `default_nettype none
 
@@ -24,6 +26,7 @@ module pemu_sysctrl (
     input  wire [31:0] wdata,
     input  wire [3:0]  be,
     output reg  [31:0] rdata,
+    output reg         err,
     input  wire [7:0]  ui_in,
     input  wire [7:0]  uio_in,
     output reg  [6:0]  gpio_out,
@@ -40,6 +43,7 @@ module pemu_sysctrl (
   wire wr = en & we;
   wire [3:0] reg_idx = addr[5:2];
   wire in_range = (addr[11:6] == 6'd0);
+  wire hit = in_range && (reg_idx <= 4'd6);
 
   always @(posedge clk or negedge rst_n)
     if (!rst_n) begin
@@ -49,7 +53,9 @@ module pemu_sysctrl (
       uio_out  <= 8'h0;
       uio_oe   <= 8'h0;
       rdata    <= 32'h0;
+      err      <= 1'b0;
     end else begin
+      if (en) err <= ~hit;
       cycle <= cycle + 32'd1;
       if (wr && in_range)
         case (reg_idx)

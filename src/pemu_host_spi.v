@@ -13,10 +13,20 @@
  *   0x01 WR_CTRL  <ctrl8>                  ctrl[0] = CPU run (0 holds Ibex in reset)
  *   0x02 WRITE    <addr32> <data32>...     word writes, address auto-increments
  *   0x03 READ     <addr32> <dummy8> ->data32...  word reads, auto-increment
- *   0x05 STATUS   -> <status8>             {4'b0, underrun, overrun, cpu_sleep, cpu_run}
+ *   0x05 STATUS   -> <status8>             {3'b0, run_refused, underrun, overrun, cpu_sleep, cpu_run}
  *   0x9F ID       -> <id32>                0x50454D55 "PEMU"
  * Bus accesses have priority over the CPU, so reads and writes also work
  * while the CPU runs (peek/poke debug).
+ *
+ * Boot guard: starting the CPU (run 0 -> 1) needs a WRITE to SRAM since the
+ * CPU last started (or since reset). Otherwise the request is refused, the
+ * CPU stays in reset and STATUS.run_refused is set (it reflects the last
+ * WR_CTRL). Stopping is always allowed.
+ *
+ * Frame rules: the command byte decides the frame; an unknown command is
+ * ignored up to CS high. Addresses are word addresses (addr[1:0] ignored). A
+ * WRITE data word is written only when all 32 bits arrived (a cut word is
+ * discarded). CS high ends any frame.
  */
 `default_nettype none
 
@@ -68,6 +78,8 @@ module pemu_host_spi (
   reg        rd_buf_valid;
   reg        overrun, underrun;
   reg        first_word;   // WRITE: the next data word goes to the start address
+  reg        loaded;       // an SRAM word was written since the CPU last started
+  reg        run_refused;  // the last WR_CTRL asked to start without a load
 
   wire [31:0] sh_next = {sh_in[30:0], mosi_s};
   wire byte_done = rise & (bit_cnt[2:0] == 3'd7);
@@ -75,7 +87,7 @@ module pemu_host_spi (
 
   assign miso = sh_out[31];
 
-  wire [7:0] status = {4'b0, underrun, overrun, cpu_sleep, cpu_run};
+  wire [7:0] status = {3'b0, run_refused, underrun, overrun, cpu_sleep, cpu_run};
 
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -89,6 +101,8 @@ module pemu_host_spi (
       overrun      <= 1'b0;
       underrun     <= 1'b0;
       first_word   <= 1'b0;
+      loaded       <= 1'b0;
+      run_refused  <= 1'b0;
       cpu_run      <= 1'b0;
       bus_req      <= 1'b0;
       bus_addr     <= 32'h0;
@@ -96,7 +110,10 @@ module pemu_host_spi (
       bus_wdata    <= 32'h0;
     end else begin
       // bus handshake: hold the request until granted; capture read data
-      if (bus_req && bus_gnt) bus_req <= 1'b0;
+      if (bus_req && bus_gnt) begin
+        bus_req <= 1'b0;
+        if (bus_we && bus_addr[31:28] == 4'h0) loaded <= 1'b1;
+      end
       if (bus_rvalid && !bus_we) begin
         rd_buf       <= bus_rdata;
         rd_buf_valid <= 1'b1;
@@ -131,8 +148,15 @@ module pemu_host_spi (
           end
           S_CTRL:
           if (byte_done) begin
-            cpu_run <= sh_next[0];
-            state   <= S_IGNORE;
+            run_refused <= 1'b0;
+            if (!sh_next[0]) cpu_run <= 1'b0;
+            else if (!cpu_run) begin
+              if (loaded) begin
+                cpu_run <= 1'b1;
+                loaded  <= 1'b0;
+              end else run_refused <= 1'b1;
+            end
+            state <= S_IGNORE;
           end
           S_ADDR:
           if (word_done) begin

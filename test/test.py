@@ -113,6 +113,68 @@ async def test_host_bridge(dut):
     assert await host.status() & 0x0C == 0, "no bridge overrun/underrun"
 
 
+ST_RUN, ST_SLEEP, ST_OVERRUN, ST_UNDERRUN, ST_RUN_REFUSED = 0x01, 0x02, 0x04, 0x08, 0x10
+
+
+async def wait_result(dut, host, polls: int = 40, every: int = 500) -> int:
+    """Poll SCRATCH over the bridge until the runtime posts a result (odd value)."""
+    result = 0
+    for _ in range(polls):
+        await ClockCycles(dut.clk, every)
+        result = (await host.read(SYS_SCRATCH))[0]
+        if result & 1:
+            break
+    return result
+
+
+@cocotb.test()
+async def test_boot_guard(dut):
+    """The bridge starts the CPU only after an SRAM load since the last start."""
+    await reset(dut)
+    host = HostSPI(dut)
+    await host.ctrl(1)                                    # nothing loaded since reset
+    st = await host.status()
+    assert st & ST_RUN == 0 and st & ST_RUN_REFUSED, f"start without a load must be refused ({st:#x})"
+    await host.write(SYS_SCRATCH, [1])                    # a peripheral write is not a load
+    await host.ctrl(1)
+    assert await host.status() & (ST_RUN | ST_RUN_REFUSED) == ST_RUN_REFUSED
+    await host.write(0x80, [0x0000006F])                  # SRAM load: "j ." at the reset vector
+    await host.ctrl(1)
+    st = await host.status()
+    assert st & ST_RUN and not st & ST_RUN_REFUSED, f"start after a load ({st:#x})"
+    await host.ctrl(1)                                    # already running: no change, no refusal
+    assert await host.status() & (ST_RUN | ST_RUN_REFUSED) == ST_RUN
+    await host.ctrl(0)                                    # stopping is always allowed
+    assert await host.status() & ST_RUN == 0
+    await host.ctrl(1)                                    # restart needs a new load
+    st = await host.status()
+    assert st & ST_RUN == 0 and st & ST_RUN_REFUSED
+    await host.write(0x80, [0x0000006F])
+    await host.ctrl(1)
+    assert await host.status() & (ST_RUN | ST_RUN_REFUSED) == ST_RUN
+    await host.ctrl(0)
+
+
+@cocotb.test()
+async def test_sysval_buserr(dut):
+    """Unmapped addresses fault on the CPU (above the 4 KiB SRAM, unused sysctrl
+    offsets, empty peripheral windows, outside both regions); mapped ones do not."""
+    await reset(dut)
+    host = HostSPI(dut)
+    image = load_image("buserr")
+    await host.write(0, image)
+    await host.ctrl(1)
+    result = await wait_result(dut, host, polls=80, every=5000)
+    if result != 1:
+        st = await host.read(RAM_BYTES - 64, 16)
+        dut._log.info("status block " + " ".join(f"{w:08x}" for w in st))
+    assert result == 1, f"firmware reported {result_text(result)} (0x{result:08x})"
+    # the host bridge reads 0 from unmapped addresses (and keeps working)
+    assert await host.read(0x1000_0040) == [0]
+    assert await host.read(0x2000_0000) == [0]
+    assert (await host.read(0x1000_0000))[0] == 0x50454D55
+
+
 @cocotb.test()
 async def test_sysval_smoke(dut):
     """Load system_validation/tests/smoke over SPI, run it on Ibex, answer its
@@ -139,12 +201,7 @@ async def test_sysval_smoke(dut):
     host.pins |= 0x15
     host._drive()
 
-    result = 0
-    for _ in range(40):
-        await ClockCycles(dut.clk, 500)
-        result = (await host.read(SYS_SCRATCH))[0]       # peek while the CPU runs
-        if result & 1:
-            break
+    result = await wait_result(dut, host)                 # peeks while the CPU runs
     dut._log.info(f"firmware result 0x{result:08x} ({result_text(result)})")
     assert result == 1, f"firmware reported {result_text(result)}"
     # after exit the runtime puts the pins in their safe state and sleeps

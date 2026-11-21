@@ -92,6 +92,7 @@ module pemu_soc (
   wire [15:0] per_addr;
   wire [3:0]  per_be;
   wire [31:0] per_wdata, per_rdata;
+  wire        per_err;
 
   pemu_bus #(.SRAM_AW(10)) u_bus (
       .clk(clk), .rst_n(rst_n),
@@ -104,7 +105,7 @@ module pemu_soc (
       .sram_en(sram_en), .sram_we(sram_we), .sram_addr(sram_addr), .sram_wdata(sram_wdata),
       .sram_be(sram_be), .sram_rdata(sram_rdata),
       .per_en(per_en), .per_we(per_we), .per_addr(per_addr), .per_wdata(per_wdata),
-      .per_be(per_be), .per_rdata(per_rdata)
+      .per_be(per_be), .per_rdata(per_rdata), .per_err(per_err)
   );
 
   pemu_sram u_sram (
@@ -113,18 +114,21 @@ module pemu_soc (
   );
 
   // ---- peripherals: 4 KiB windows selected by per_addr[15:12] ---------------
+  // A window with no peripheral answers with a bus error.
   wire        sys_sel = per_addr[15:12] == 4'h0;
   wire [31:0] sys_rdata;
+  wire        sys_err;
   reg         sys_sel_q;
   always @(posedge clk or negedge rst_n)
     if (!rst_n) sys_sel_q <= 1'b0;
     else if (per_en) sys_sel_q <= sys_sel;
   assign per_rdata = sys_sel_q ? sys_rdata : 32'h0;
+  assign per_err   = sys_sel_q ? sys_err : 1'b1;
 
   pemu_sysctrl u_sys (
       .clk(clk), .rst_n(rst_n),
       .en(per_en & sys_sel), .we(per_we), .addr(per_addr[11:0]), .wdata(per_wdata),
-      .be(per_be), .rdata(sys_rdata),
+      .be(per_be), .rdata(sys_rdata), .err(sys_err),
       .ui_in(ui_in), .uio_in(uio_in),
       .gpio_out(gpio_out), .uio_out(uio_out), .uio_oe(uio_oe)
   );

@@ -51,6 +51,7 @@ toolchain. CI rebuilds them and fails if they differ.
 | Test | Checks | Run by |
 |---|---|---|
 | `tests/smoke` | sysctrl ID; `.data`/`.bss`/`.rodata` set up; recursion (stack); M extension; byte stores; cycle counter; status block at the top of the 4 KiB SRAM; output pins seen by the host, then a host answer on `ui_in[4:0]`; safe state and sleep after exit | `test/test.py::test_sysval_smoke` |
+| `tests/buserr` | every unmapped address faults (load, store, fetch): above the 4 KiB SRAM, unused sysctrl offsets, empty peripheral windows, outside both regions; mapped addresses and writes to read-only registers do not. Uses its own trap table so one run covers all probes | `test/test.py::test_sysval_buserr` |
 
 Add a test: create `tests/<name>/main.c`, run `make -C system_validation`,
 then add a cocotb test in `test/test.py` that loads `images/<name>.bin`.
