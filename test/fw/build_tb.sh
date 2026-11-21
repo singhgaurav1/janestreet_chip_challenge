@@ -35,13 +35,15 @@ case $WHICH in
     EXE=Vtb_$WHICH
     [ "$WHICH" = ref_micro ] && DEFS+=(-DIBEX_MICRO) ;;
   chip)
-    # Same RTL list as the RTL chat's cocotb tests, so new blocks are picked up.
-    SRCS=$(sed -n '/^PROJECT_SOURCES/,/[^\\]$/p' "$ROOT/test/Makefile" \
-           | sed 's/PROJECT_SOURCES *=//; s/\\//g')
+    # RTL sources and SRAM model exactly as the RTL chat's cocotb tests list
+    # them in test/Makefile, so new blocks or a new macro are picked up.
+    mkvar() {  # print a variable from test/Makefile, joining continuation lines
+      sed -n "/^$1 *=/,/[^\\]\$/p" "$ROOT/test/Makefile" | sed "s/^$1 *=//; s/\\\\//g"
+    }
     CORE=()
-    for f in $SRCS; do CORE+=("$ROOT/src/$f"); done
-    CORE+=("$ROOT/test/sram_model/RM_IHPSG13_1P_1024x32_c2_bm_bist.v"
-           "$ROOT/test/sram_model/RM_IHPSG13_1P_core_behavioral_bm_bist.v")
+    for f in $(mkvar PROJECT_SOURCES); do CORE+=("$ROOT/src/$f"); done
+    for f in $(mkvar SRAM_MODEL); do CORE+=("${f/\$(PWD)/$ROOT/test}"); done
+    [ ${#CORE[@]} -gt 3 ] || { echo "could not read PROJECT_SOURCES/SRAM_MODEL from test/Makefile"; exit 1; }
     DEFS=(-DSIM -DFUNCTIONAL -I"$ROOT/src")
     TOP=tb_chip_fw; TBSRC=$HERE/tb_chip_fw.sv; EXE=Vtb_chip
     # Emulate the X->0 / X->1 edges of event-driven simulators. Internal reset

@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FW = ROOT / "fw"
 TBS = {"conv": ROOT / "test/fw/obj/Vtb", "ref": ROOT / "test/fw/obj/Vtb_ref",
        "ref_micro": ROOT / "test/fw/obj/Vtb_ref_micro", "chip": ROOT / "test/fw/obj/Vtb_chip"}
-TARGET_RAM = {"tb": 4096, "chip": 2048}
+TARGET_RAM = {"tb": 4096, "chip": 4096}
 
 # fw_status_t word indices (fw/include/fw.h)
 ST = dict(magic=0, state=1, reason=2, detail=3, mcause=4, mepc=5, mtval=6, ra=7, sp=8,
@@ -104,6 +104,12 @@ def chip_cases() -> list[Case]:
         Case("corrupt_image", "chiptest", p(CRC), dict(state=PANIC, reason=CRC), patch="flip:40"),
         Case("truncated_load", "chiptest", p(CRC), dict(state=PANIC, reason=CRC),
              patch="truncate:1024"),
+        # Access just past the end of the SRAM. docs/soc.md today: the SRAM
+        # aliases (exit 50). When A13 lands (bus error above the SRAM size),
+        # expect p(EXC) with mcause 5 and mtval = FW_RAM_SIZE + 0x84 instead.
+        Case("bridge_while_running", "bridgetest", 0, dict(state=EXITED, reason=0),
+             ["+bridge_tests"]),
+        Case("beyond_ram", "crashtest-beyondram", 50, dict(state=EXITED, reason=50)),
     ]
 
 
@@ -172,7 +178,8 @@ def run(case: Case, args, tmp: Path) -> tuple[bool, str]:
     status_addr = args.ram - 64
     # case plusargs first: the testbench takes the first match of each name
     cmd = [str(TBS[args.tb])] + case.plusargs + [
-        f"+img={img}", f"+img_len={img_len}", f"+ram_size={args.ram}", f"+dump={status_addr:x}",
+        f"+img={img}", f"+img_len={img_len}", f"+ram_size={args.ram}", f"+ram={args.ram}",
+        f"+dump={status_addr:x}",
         "+max_cycles=1000000", "+verilator+rand+reset+2", f"+verilator+seed+{args.seed}"]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     log = p.stdout + p.stderr

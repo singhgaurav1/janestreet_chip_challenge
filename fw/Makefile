@@ -5,7 +5,7 @@
 #   make host-test           HAL unit tests on the build machine
 #   make clean
 # Variables:
-#   TARGET   chip (default): the SoC of docs/soc.md, 2 KiB SRAM, results to
+#   TARGET   chip (default): the SoC of docs/soc.md, 4 KiB SRAM, results to
 #            sysctrl SCRATCH.  tb: test/fw/tb_ibex_fw.sv, 4 KiB, FW_SIM device.
 #   RAM_SIZE override the target's RAM size (bytes)
 #   CROSS    toolchain prefix
@@ -19,7 +19,7 @@ TARGET   ?= chip
 # which fails the build if it does not fit.
 STACK_MIN ?= 128
 ifeq ($(TARGET),chip)
-  RAM_SIZE ?= 2048
+  RAM_SIZE ?= 4096
   SIM      := 0
 else ifeq ($(TARGET),tb)
   RAM_SIZE ?= 4096

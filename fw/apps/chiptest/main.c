@@ -1,7 +1,8 @@
 /*
  * Self-test on the full chip (docs/soc.md), run by test/fw/tb_chip_fw.sv after
  * loading it over the host SPI bridge. Checks the sysctrl block and the GPIO
- * pins from the firmware side. The testbench wires the pins back:
+ * pins from the firmware side (behaviour past the end of RAM is tested by
+ * crashtest-beyondram). The testbench wires the pins back:
  *   ui_in[4:0] = uo_out[4:0] ^ 5'h15
  *   uio_in     = (uio_out & uio_oe) | (8'hC3 & ~uio_oe)   (external pulls)
  * Returns 0 on success, else the number of the failed check.
@@ -55,10 +56,6 @@ int main(void)
         settle();
         CHECK(4, sysctrl_uio_in() == u[i].in);
     }
-
-    /* 5. SRAM aliases above 0x7FF (docs/soc.md): 0x884 reads the image
-     *    header magic at 0x84 */
-    CHECK(5, mmio_read32(FW_RAM_BASE + FW_RAM_SIZE + FW_IMAGE_HDR_OFF) == FW_IMAGE_MAGIC);
 
     /* Leave the pins driven: fw_exit's safe state must release them (the
      * testbench checks uio_oe == 0 and uo_out[6:0] == 0 after exit). */
