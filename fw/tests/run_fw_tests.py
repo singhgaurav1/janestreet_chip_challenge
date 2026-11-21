@@ -50,6 +50,7 @@ class Case:
     patch: str | None = None        # "flip:<offset-from-end>" | "truncate:<bytes>"
     pew: list | None = None         # exact PE-block write sequence (+pe_stub)
     pins: tuple | None = None       # chip: expected (uo_out[6:0], uio_oe) at the end
+    log: list = field(default_factory=list)  # regexes that must appear in the log
 
 
 # HAL on the core (apps/halpanic): init, load, configure, hand pads to engine 1,
@@ -97,19 +98,33 @@ def chip_cases() -> list[Case]:
         Case("ecall", "crashtest-ecall", p(EXC), dict(state=PANIC, reason=EXC, mcause=11)),
         Case("assert", "crashtest-assert", p(ASSERT), dict(state=PANIC, reason=ASSERT)),
         Case("exit_code", "crashtest-exitcode", 42, dict(state=EXITED, reason=42)),
+        # Boot guard (docs/soc.md): a restart with no SRAM write since the last
+        # start is refused; the CPU stays in reset where it stopped.
+        Case("restart_refused", "crashtest-spin", -3, dict(state=RUNNING),
+             ["+restart_at=150000", "+max_cycles=400000"],
+             log=[r"RESTART run_refused=1 cpu_run=0"]),
+        Case("restart_refused_during_boot", "crashtest-spin", -3, dict(state=BOOTING),
+             ["+restart_at=10000", "+max_cycles=300000"],
+             log=[r"RESTART run_refused=1 cpu_run=0"]),
+        # One SRAM word written satisfies the guard without a reload: the
+        # firmware's own check must then refuse the stale image.
         Case("restart_without_reload", "crashtest-spin", p(DIRTY),
-             dict(state=PANIC, reason=DIRTY), ["+restart_at=150000"]),
+             dict(state=PANIC, reason=DIRTY), ["+restart_at=150000", "+restart_poke"],
+             log=[r"RESTART run_refused=0 cpu_run=1"]),
+        # Same during boot: the image is still fresh (boot checks had not
+        # finished), so the second boot runs normally.
         Case("restart_during_boot", "crashtest-spin", -3, dict(state=RUNNING),
-             ["+restart_at=10000", "+max_cycles=700000"]),
+             ["+restart_at=10000", "+restart_poke", "+max_cycles=700000"],
+             log=[r"RESTART run_refused=0 cpu_run=1"]),
         Case("corrupt_image", "chiptest", p(CRC), dict(state=PANIC, reason=CRC), patch="flip:40"),
         Case("truncated_load", "chiptest", p(CRC), dict(state=PANIC, reason=CRC),
              patch="truncate:1024"),
-        # Access just past the end of the SRAM. docs/soc.md today: the SRAM
-        # aliases (exit 50). When A13 lands (bus error above the SRAM size),
-        # expect p(EXC) with mcause 5 and mtval = FW_RAM_SIZE + 0x84 instead.
         Case("bridge_while_running", "bridgetest", 0, dict(state=EXITED, reason=0),
              ["+bridge_tests"]),
-        Case("beyond_ram", "crashtest-beyondram", 50, dict(state=EXITED, reason=50)),
+        # Access just past the end of the SRAM: a load access fault
+        # (docs/soc.md "Bus errors"; nothing aliases).
+        Case("beyond_ram", "crashtest-beyondram", p(EXC),
+             dict(state=PANIC, reason=EXC, mcause=5, mtval=4096 + 0x84)),
     ]
 
 
@@ -207,6 +222,9 @@ def run(case: Case, args, tmp: Path) -> tuple[bool, str]:
         got = (int(m.group(1), 16) & 0x7F, int(m.group(2), 16)) if m else None
         if got != case.pins:
             errs.append(f"pins (uo_out[6:0], uio_oe) = {got}, expected {case.pins}")
+    for pat in case.log:
+        if not re.search(pat, log):
+            errs.append(f"log has no line matching {pat!r}")
     exp = {"magic": STATUS_MAGIC, **case.status}
     for k, v in exp.items():
         got = mem[ST[k]] if len(mem) > ST[k] else None
