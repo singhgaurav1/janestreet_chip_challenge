@@ -1,9 +1,8 @@
 /*
  * Platform description: memory map and chip-level constants.
  *
- * Source: docs/soc.md (SoC skeleton, 2026-11-18). Marked STUB where soc.md
- * does not yet define something; those move to the generated regs.h when F1
- * lands. Nothing outside this file and pe_regs.h may hard-code an address.
+ * Source: docs/soc.md. Nothing outside this file and pe_regs.h may hard-code
+ * an address; both move to the generated regs.h when F1 lands.
  *
  * Two build targets (fw/Makefile TARGET=):
  *   chip  the SoC of docs/soc.md: 4 KiB SRAM, results to sysctrl SCRATCH
@@ -32,17 +31,17 @@
 #define FW_SYSCTRL_SCRATCH    (FW_SYSCTRL_BASE + 0x18u)  /* RW mailbox to the host */
 #define FW_SYSCTRL_ID_VALUE   0x50454D55u                /* "PEMU" */
 
-/* ---- Protocol Engine block (soc.md: "next step", at 0x1000_1000) ---- */
+/* ---- Protocol Engine block (docs/soc.md, docs/pe_isa.md section 6) ---- */
 #ifndef FW_PE_BASE
 #define FW_PE_BASE    0x10001000u
 #endif
 
-/* ---- Interrupt wiring (Ibex fast interrupts are IDs 16..30) ----
- * STUB: neither soc.md nor pe_isa.md says which Ibex interrupt line(s) the
- * PE block drives (fw/QUESTIONS.md A3). Assumed: event flag n -> irq_fast_i[n]
- * -> interrupt ID 16 + n. */
-#define FW_IRQ_ID_FAST0     16u
-#define FW_IRQ_ID_PE_EVT(n) (FW_IRQ_ID_FAST0 + (n))
+/* ---- Interrupt wiring (docs/soc.md "Pads and interrupts") ----
+ * Ibex fast interrupts: event flag n -> ID 16 + n; engine n FIFO -> ID 24 + n.
+ * IDs 28-30, external, timer, software and NMI are tied off. */
+#define FW_IRQ_ID_FAST0      16u
+#define FW_IRQ_ID_PE_EVT(n)  (FW_IRQ_ID_FAST0 + (n))
+#define FW_IRQ_ID_PE_FIFO(n) (FW_IRQ_ID_FAST0 + 8u + (n))
 
 /* ---- Clock ---- */
 #define FW_SYS_HZ     60000000u     /* fixed decision: 60 MHz */

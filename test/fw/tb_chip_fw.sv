@@ -17,12 +17,20 @@
 //   +load_len=<bytes>   load only the first n bytes (truncated-load test)
 //   +no_verify          skip the read-back check (needed with +load_len)
 //   +restart_at=<n>     n cycles after start: clear and set CTRL.run again
-//                       without reloading (restart-without-reload test)
+//                       without reloading. docs/soc.md boot guard: the bridge
+//                       refuses (STATUS.run_refused) unless SRAM was written
+//                       since the last start. Prints "RESTART run_refused=..
+//                       cpu_run=..".
+//   +restart_poke       before that restart, write one SRAM word (the status
+//                       block's last word): satisfies the boot guard without a
+//                       reload, so the firmware's own stale-image check runs
 //   +rerun              after the first result: hold, reload, verify, run again
 //   +sck_half=<n>       SCK half period in clocks (default 3: SCK = clk/6 = 10 MHz)
 //   +poll=<n>           cycles between SCRATCH polls (default 2000)
 //   +max_cycles=<n>     timeout (default 3,000,000)
 //   +dump=<addr>        at the end, read 16 words from addr (hex) over SPI
+//   +dump2=<addr> +dump2_n=<n>, +dump3=<addr> +dump3_n=<n>
+//                       then n words from each (hex address), printed as REG lines
 //   +bridge_tests       while the CPU runs (fw/apps/bridgetest): peek the
 //                       status-block heartbeat twice, send junk frames, check
 //                       the ID, record unspecified cases (aborted and
@@ -59,7 +67,8 @@ module tb_chip_fw;
   string img;
   int img_len = -1, load_len = -1, restart_at = -1, sck_half = 3, poll = 2000;
   int max_cycles = 3000000, dump_addr = -1, ram = 4096;
-  bit no_verify = 0, rerun = 0, bridge_tests = 0, bridge_done = 0;
+  int dump2 = -1, dump2_n = 1, dump3 = -1, dump3_n = 1;
+  bit no_verify = 0, rerun = 0, bridge_tests = 0, bridge_done = 0, restart_poke = 0;
   logic [7:0] image [0:65535];
   longint cycles = 0;
   always @(posedge clk) cycles <= cycles + 1;
@@ -192,16 +201,20 @@ module tb_chip_fw;
     cs_begin(); spi_byte(8'h00, r); for (int i = 0; i < 4; i++) spi_byte(8'hA5, r); cs_end();
     cmd_id(id);
     if (id !== ID_VALUE) begin fail(-21, $sformatf("ID 0x%08x after junk frames", id)); return; end
+    // docs/soc.md frame rules: a word cut short by CS high is discarded
     cs_begin(); spi_byte(8'h02, r); spi_word_out(st_base + 60); spi_byte(8'hAB, r); spi_byte(8'hCD, r);
     cs_end();
     cmd_read(st_base + 60, 1, d);
-    $display("NOTE aborted_write: mailbox after a WRITE cut after 2 data bytes = 0x%08x", d[0]);
-    // Unaligned WRITE address (docs/soc.md: "word writes"; alignment unspecified)
+    if (d[0] !== 32'h0) begin
+      fail(-22, $sformatf("aborted WRITE changed memory: 0x%08x", d[0])); return;
+    end
+    // ... and addr[1:0] are ignored: a WRITE at +62 lands on the word at +60
     w = {32'h1122_3344};
     cmd_write(st_base + 62, w);
-    cmd_read(st_base + 56, 3, d);
-    $display("NOTE unaligned_write: WRITE 0x11223344 at +62 -> words +56/+60/+64 = 0x%08x 0x%08x 0x%08x",
-             d[0], d[1], d[2]);
+    cmd_read(st_base + 60, 1, d);
+    if (d[0] !== 32'h1122_3344) begin
+      fail(-23, $sformatf("unaligned WRITE: word at +60 = 0x%08x", d[0])); return;
+    end
     // Poke the mailbox: the firmware finishes when it sees this
     w = {32'hC0FF_EE01};
     cmd_write(st_base + 60, w);
@@ -219,9 +232,18 @@ module tb_chip_fw;
     while (cycles < longint'(max_cycles)) begin
       repeat (poll) @(negedge clk);
       if (t_next_restart >= 0 && cycles >= t_next_restart) begin
-        $display("tb_chip_fw: CTRL.run 0 then 1 without reload, cycle %0d", cycles);
+        logic [7:0] st;
+        logic [31:0] w[$];
+        $display("tb_chip_fw: CTRL.run 0 then 1 without reload%s, cycle %0d",
+                 restart_poke ? " (one SRAM word written)" : "", cycles);
         cmd_ctrl(8'h00);
+        if (restart_poke) begin
+          w = {32'h0};
+          cmd_write(32'(ram - 4), w);
+        end
         cmd_ctrl(8'h01);
+        cmd_status(st);
+        $display("RESTART run_refused=%0d cpu_run=%0d", st[4], st[0]);
         t_next_restart = -1;
       end
       if (bridge_tests && !bridge_done && cycles >= t_start + 60000) begin
@@ -260,8 +282,13 @@ module tb_chip_fw;
     void'($value$plusargs("poll=%d", poll));
     void'($value$plusargs("max_cycles=%d", max_cycles));
     void'($value$plusargs("dump=%h", dump_addr));
+    void'($value$plusargs("dump2=%h", dump2));
+    void'($value$plusargs("dump2_n=%d", dump2_n));
+    void'($value$plusargs("dump3=%h", dump3));
+    void'($value$plusargs("dump3_n=%d", dump3_n));
     no_verify = $test$plusargs("no_verify");
     rerun = $test$plusargs("rerun");
+    restart_poke = $test$plusargs("restart_poke");
     bridge_tests = $test$plusargs("bridge_tests");
     void'($value$plusargs("ram=%d", ram));
     for (int i = 0; i < 65536; i++) image[i] = 8'h00;
@@ -296,6 +323,16 @@ module tb_chip_fw;
       cmd_read(32'(dump_addr), 16, d);
       foreach (d[i]) $display("MEM 0x%08x 0x%08x", dump_addr + 4 * i, d[i]);
     end
+    if (dump2 >= 0) begin
+      cmd_read(32'(dump2), dump2_n, d);
+      foreach (d[i]) $display("REG 0x%08x 0x%08x", dump2 + 4 * i, d[i]);
+    end
+    if (dump3 >= 0) begin
+      cmd_read(32'(dump3), dump3_n, d);
+      foreach (d[i]) $display("REG 0x%08x 0x%08x", dump3 + 4 * i, d[i]);
+    end
+    cmd_status(st);
+    if (st[3:2] != 0) fail(-14, $sformatf("bridge error status 0x%02x after dumps", st));
     if (!finished) report(result);
     $finish;
   end

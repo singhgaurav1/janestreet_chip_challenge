@@ -50,28 +50,54 @@ class Case:
     patch: str | None = None        # "flip:<offset-from-end>" | "truncate:<bytes>"
     pew: list | None = None         # exact PE-block write sequence (+pe_stub)
     pins: tuple | None = None       # chip: expected (uo_out[6:0], uio_oe) at the end
+    log: list = field(default_factory=list)  # regexes that must appear in the log
+    # chip: registers read over the host bridge at the end, {addr: value or
+    # set of allowed values}; at most two contiguous runs of addresses
+    regs: dict = field(default_factory=dict)
 
 
 # HAL on the core (apps/halpanic): init, load, configure, hand pads to engine 1,
 # start, then panic. Expected writes derived by hand from pe_isa.md section 6
-# and the stub shared-block offsets in fw/include/pe_regs.h.
+# (register map v1).
 PE = 0x10001000  # docs/soc.md
 E1, SH = PE + 0x100, PE + 0x400
 HALPANIC_PEW = (
-    [(PE + 0x100 * n, 0) for n in range(4)]                 # pe_hal_init: engines off
-    + [(SH + 0x10C, 0), (SH + 0x100, 0), (SH + 0x120, 0), (SH + 0x118, 0), (SH + 0x11C, 0)]
+    # pe_hal_init: ENGINE_CTRL, IRQ_EN, EVT, GPIO_OE, PAD_OD, GPIO_OUT all 0
+    [(SH + 0x110, 0), (SH + 0x10C, 0), (SH + 0x100, 0), (SH + 0x120, 0), (SH + 0x118, 0),
+     (SH + 0x11C, 0)]
     + [(SH + 4 * (8 + i), w) for i, w in enumerate([0x9f50, 0xf727, 0x6001, 0x0642])]  # IMEM 8..11
     + [(E1 + 0x04, 0x00411B00),   # CLKDIV: 60 MHz / 921.6 kHz = 65 + 27/256
        (E1 + 0x08, 0x08500060),   # EXECCTRL: uart_tx image + ORIGIN 8
        (E1 + 0x0C, 0x00000003), (E1 + 0x10, 0x00880031),             # PINCTRL: OUT/SIDE base 17
        (E1 + 0x14, 0x0001E140), (E1 + 0x18, 0), (E1 + 0x1C, 0)]
-    + [(SH + 0x140 + 4 * (17 - 8), 1), (SH + 0x140 + 4 * (9 - 8), 1), (SH + 0x118, 0x02)]
-    + [(E1, 0x6), (E1, 0x1)]                                         # restart, then enable
-    # fw_panic -> pe_safe_state, in this order:
-    + [(PE + 0x100 * n, 0) for n in range(4)] + [(SH + 0x10C, 0)]
-    + [(SH + 0x140 + 4 * (9 - 8), 4), (SH + 0x140 + 4 * (17 - 8), 4)]  # owners -> CPU
-    + [(SH + 0x120, 0), (SH + 0x118, 0), (SH + 0x11C, 0)]             # OE off, then OD off, then out
+    + [(SH + 0x140 + 4 * (17 - 8), 1), (SH + 0x140 + 4 * (9 - 8), 1),  # PAD_OWNER 17, 9 -> engine 1
+       (SH + 0x138, 0x02)]                                           # PAD_OD_SET pad 9
+    + [(E1, 0x7)]                                                    # EN|RESTART|DIV_RESTART
+    # fw_panic -> pe_safe_state: SAFE_STATE key, then IRQ_EN off
+    + [(SH + 0x114, 0x5AFE), (SH + 0x10C, 0)]
 )
+
+
+def reg_runs(addrs) -> list[tuple[int, int]]:
+    """(base, words) runs covering the addresses, gaps not read."""
+    runs = []
+    for a in sorted(addrs):
+        if runs and a == runs[-1][0] + 4 * runs[-1][1]:
+            runs[-1] = (runs[-1][0], runs[-1][1] + 1)
+        else:
+            runs.append((a, 1))
+    if len(runs) > 2:
+        raise ValueError(f"regs need {len(runs)} runs, the bench reads 2")
+    return runs
+
+
+# pehal-pads ends in a panic with engine 1 running and pads 8, 9 and 16 owned
+# by the CPU (9 open drain, pulling low). After the safe state: engines off,
+# those pads released (NONE = 6 or 7, pe_isa.md 6.2), the others still system.
+ENGINE_CTRL, PAD_OWNER = SH + 0x110, SH + 0x140
+PEHAL_PADS_REGS = {ENGINE_CTRL: 0,
+                   **{PAD_OWNER + 4 * (p - 8): ({6, 7} if p in (8, 9, 16) else 5)
+                      for p in range(8, 24)}}
 
 
 def cases(target: str) -> list[Case]:
@@ -97,19 +123,38 @@ def chip_cases() -> list[Case]:
         Case("ecall", "crashtest-ecall", p(EXC), dict(state=PANIC, reason=EXC, mcause=11)),
         Case("assert", "crashtest-assert", p(ASSERT), dict(state=PANIC, reason=ASSERT)),
         Case("exit_code", "crashtest-exitcode", 42, dict(state=EXITED, reason=42)),
+        # Boot guard (docs/soc.md): a restart with no SRAM write since the last
+        # start is refused; the CPU stays in reset where it stopped.
+        Case("restart_refused", "crashtest-spin", -3, dict(state=RUNNING),
+             ["+restart_at=150000", "+max_cycles=400000"],
+             log=[r"RESTART run_refused=1 cpu_run=0"]),
+        Case("restart_refused_during_boot", "crashtest-spin", -3, dict(state=BOOTING),
+             ["+restart_at=10000", "+max_cycles=300000"],
+             log=[r"RESTART run_refused=1 cpu_run=0"]),
+        # One SRAM word written satisfies the guard without a reload: the
+        # firmware's own check must then refuse the stale image.
         Case("restart_without_reload", "crashtest-spin", p(DIRTY),
-             dict(state=PANIC, reason=DIRTY), ["+restart_at=150000"]),
+             dict(state=PANIC, reason=DIRTY), ["+restart_at=150000", "+restart_poke"],
+             log=[r"RESTART run_refused=0 cpu_run=1"]),
+        # Same during boot: the image is still fresh (boot checks had not
+        # finished), so the second boot runs normally.
         Case("restart_during_boot", "crashtest-spin", -3, dict(state=RUNNING),
-             ["+restart_at=10000", "+max_cycles=700000"]),
+             ["+restart_at=10000", "+restart_poke", "+max_cycles=700000"],
+             log=[r"RESTART run_refused=0 cpu_run=1"]),
         Case("corrupt_image", "chiptest", p(CRC), dict(state=PANIC, reason=CRC), patch="flip:40"),
         Case("truncated_load", "chiptest", p(CRC), dict(state=PANIC, reason=CRC),
              patch="truncate:1024"),
-        # Access just past the end of the SRAM. docs/soc.md today: the SRAM
-        # aliases (exit 50). When A13 lands (bus error above the SRAM size),
-        # expect p(EXC) with mcause 5 and mtval = FW_RAM_SIZE + 0x84 instead.
         Case("bridge_while_running", "bridgetest", 0, dict(state=EXITED, reason=0),
              ["+bridge_tests"]),
-        Case("beyond_ram", "crashtest-beyondram", 50, dict(state=EXITED, reason=50)),
+        # Access just past the end of the SRAM: a load access fault
+        # (docs/soc.md "Bus errors"; nothing aliases).
+        Case("beyond_ram", "crashtest-beyondram", p(EXC),
+             dict(state=PANIC, reason=EXC, mcause=5, mtval=4096 + 0x84)),
+        # PE HAL on the real PE block (pe_isa.md 6, docs/soc.md)
+        Case("pehal_fifo", "pehal-fifo", 0, dict(state=EXITED, reason=0)),
+        Case("pehal_engines", "pehal-engines", 0, dict(state=EXITED, reason=0)),
+        Case("pehal_pads", "pehal-pads", p(16 + 1), dict(state=PANIC, reason=17, detail=0x5AFE),
+             pins=released, regs=PEHAL_PADS_REGS),
     ]
 
 
@@ -180,6 +225,8 @@ def run(case: Case, args, tmp: Path) -> tuple[bool, str]:
     cmd = [str(TBS[args.tb])] + case.plusargs + [
         f"+img={img}", f"+img_len={img_len}", f"+ram_size={args.ram}", f"+ram={args.ram}",
         f"+dump={status_addr:x}",
+        *[f"+dump{i + 2}={b:x} +dump{i + 2}_n={n}".split()[j]
+          for i, (b, n) in enumerate(reg_runs(case.regs)) for j in (0, 1)],
         "+max_cycles=1000000", "+verilator+rand+reset+2", f"+verilator+seed+{args.seed}"]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     log = p.stdout + p.stderr
@@ -207,6 +254,17 @@ def run(case: Case, args, tmp: Path) -> tuple[bool, str]:
         got = (int(m.group(1), 16) & 0x7F, int(m.group(2), 16)) if m else None
         if got != case.pins:
             errs.append(f"pins (uo_out[6:0], uio_oe) = {got}, expected {case.pins}")
+    regs = {int(a, 16): int(v, 16) for a, v in
+            re.findall(r"REG (0x[0-9a-f]+) (0x[0-9a-f]+)", log)}
+    for a, want in case.regs.items():
+        ok = want if isinstance(want, set) else {want}
+        got = regs.get(a)
+        if got not in ok:
+            errs.append(f"reg 0x{a:08x} = {'missing' if got is None else hex(got)}, "
+                        f"expected {' or '.join(hex(x) for x in sorted(ok))}")
+    for pat in case.log:
+        if not re.search(pat, log):
+            errs.append(f"log has no line matching {pat!r}")
     exp = {"magic": STATUS_MAGIC, **case.status}
     for k, v in exp.items():
         got = mem[ST[k]] if len(mem) > ST[k] else None

@@ -217,31 +217,55 @@ static void test_configure_start_stop(void)
     EXPECT_EQ(pe_configure(2, &c), PE_OK);
     static const uint32_t offs[7] = {0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C};
     const uint32_t vals[7] = {c.clkdiv, c.execctrl, c.shiftctrl, c.pinctrl, c.assist, c.crc_poly, c.timing};
-    EXPECT_EQ(mock.nlog - n0, 7);
-    for (int i = 0; i < 7; i++) {
-        EXPECT_EQ(mock.log[n0 + i].addr, EB(2, offs[i]));
-        EXPECT_EQ(mock.log[n0 + i].value, vals[i]);
-    }
+    int w = 0;
+    for (int i = n0; i < mock.nlog; i++)
+        if (mock.log[i].op == 'W') {
+            EXPECT(w < 7);
+            if (w < 7) {
+                EXPECT_EQ(mock.log[i].addr, EB(2, offs[w]));
+                EXPECT_EQ(mock.log[i].value, vals[w]);
+            }
+            w++;
+        }
+    EXPECT_EQ(w, 7);
     n0 = mock.nlog;
     EXPECT_EQ(pe_start(2), PE_OK);
-    EXPECT_EQ(mock.nlog - n0, 2);
-    EXPECT_EQ(mock.log[n0].addr, EB(2, 0));
-    EXPECT_EQ(mock.log[n0].value, 0x6u);                 /* RESTART | DIV_RESTART */
-    EXPECT_EQ(mock.log[n0 + 1].value, 0x1u);             /* EN */
+    /* pe_isa.md 6.1: EN|RESTART|DIV_RESTART in one write starts cleanly */
+    EXPECT_EQ(mock_count_writes(EB(2, 0)), 1 + 0);
+    uint32_t v;
+    EXPECT(mock_last_write(EB(2, 0), &v) >= n0 && v == 0x7u);
     EXPECT_EQ(pe_enabled_mask(), 0x4u);
-    n0 = mock.nlog;
+    int nw = mock_count_writes(EB(2, 0x04));
     EXPECT_EQ(pe_configure(2, &c), (unsigned long long)PE_EBUSY);
-    EXPECT_EQ(mock.nlog, n0);                            /* nothing written */
+    EXPECT_EQ(mock_count_writes(EB(2, 0x04)), nw);       /* nothing written */
     pe_cfg_t bad = c;
     bad.timing = 0xFFFFFFFFu;                            /* SYNC_PHASE >= INT */
     EXPECT_EQ(pe_configure(1, &bad), (unsigned long long)PE_EINVAL);
     EXPECT_EQ(pe_configure(4, &c), (unsigned long long)PE_EINVAL);
     EXPECT_EQ(pe_configure(0, NULL), (unsigned long long)PE_EINVAL);
-    EXPECT_EQ(mock.nlog, n0);
+    EXPECT_EQ(mock_count_writes(EB(1, 0x04)), 0);
     EXPECT_EQ(pe_stop(2), PE_OK);
-    EXPECT_EQ(mock.log[mock.nlog - 1].value, 0u);
+    EXPECT(mock_last_write(EB(2, 0), &v) >= 0 && v == 0u);
     EXPECT_EQ(pe_enabled_mask(), 0u);
     EXPECT_EQ(pe_start(9), (unsigned long long)PE_EINVAL);
+}
+
+static void test_engine_ctrl_mask(void)
+{
+    mock_reset();
+    pe_hal_init();
+    pe_start(1);                                         /* engine 1 already running */
+    uint32_t v;
+    EXPECT_EQ(pe_start_mask(0x5), PE_OK);                /* start 0 and 2 together */
+    EXPECT(mock_last_write(SH(0x110), &v) >= 0);
+    /* EN = 0b0111 (1 keeps running), RESTART = DIV_RESTART = 0b0101 */
+    EXPECT_EQ(v, 0x7u | (0x5u << 4) | (0x5u << 8));
+    EXPECT_EQ(pe_enabled_mask(), 0x7u);
+    EXPECT_EQ(pe_stop_mask(0x3), PE_OK);
+    EXPECT(mock_last_write(SH(0x110), &v) >= 0 && v == 0x4u);   /* only 2 left, no restarts */
+    EXPECT_EQ(pe_start_mask(0), (unsigned long long)PE_EINVAL);
+    EXPECT_EQ(pe_start_mask(0x10), (unsigned long long)PE_EINVAL);
+    EXPECT_EQ(pe_stop_mask(0x10), (unsigned long long)PE_EINVAL);
 }
 
 static void test_load_program(void)
@@ -249,11 +273,10 @@ static void test_load_program(void)
     mock_reset();
     pe_hal_init();
     uint16_t code[8] = {0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888};
-    int n0 = mock.nlog;
     EXPECT_EQ(pe_load_program(60, code, 4), PE_OK);
-    EXPECT_EQ(mock.nlog - n0, 4);
-    EXPECT_EQ(mock.log[n0].addr, SH(4u * 60));
-    EXPECT_EQ(mock.log[n0 + 3].value, 0x4444u);
+    uint32_t v;
+    for (uint32_t i = 0; i < 4; i++)
+        EXPECT(mock_last_write(SH(4u * (60 + i)), &v) >= 0 && v == code[i]);
     EXPECT_EQ(pe_load_program(61, code, 4), (unsigned long long)PE_EINVAL);  /* past 63 */
     EXPECT_EQ(pe_load_program(64, code, 1), (unsigned long long)PE_EINVAL);
     EXPECT_EQ(pe_load_program(0, code, 0), (unsigned long long)PE_EINVAL);
@@ -265,11 +288,16 @@ static void test_load_program(void)
     pe_cfg_set(&c, PE_F_ORIGIN, 40);
     pe_configure(1, &c);
     pe_start(1);
-    n0 = mock.nlog;
+    int imem_writes = 0;
+    for (uint32_t i = 0; i < 64; i++)
+        imem_writes += mock_count_writes(SH(4u * i));
     EXPECT_EQ(pe_load_program(0, code, 4), (unsigned long long)PE_EBUSY);   /* wrapped part */
     EXPECT_EQ(pe_load_program(63, code, 1), (unsigned long long)PE_EBUSY);
     EXPECT_EQ(pe_load_program(36, code, 8), (unsigned long long)PE_EBUSY);  /* 36..43 */
-    EXPECT_EQ(mock.nlog, n0);
+    int imem_writes2 = 0;
+    for (uint32_t i = 0; i < 64; i++)
+        imem_writes2 += mock_count_writes(SH(4u * i));
+    EXPECT_EQ(imem_writes2, imem_writes);                                   /* nothing written */
     EXPECT_EQ(pe_load_program(8, code, 8), PE_OK);                          /* 8..15 */
     EXPECT_EQ(pe_load_program(32, code, 8), PE_OK);                         /* 32..39 */
     pe_stop(1);
@@ -317,18 +345,21 @@ static void test_fifos(void)
     n0 = mock.nlog;
     EXPECT_EQ(pe_clear_errors(2), PE_OK);
     EXPECT_EQ(mock.log[n0].addr, EB(2, 0x2C));
-    EXPECT_EQ(mock.log[n0].value, 0xC0u);                /* SERR | OVF, W1C */
+    EXPECT_EQ(mock.log[n0].value, 0x600C0u);             /* SERR|OVF|TXOVF|RXUNF, W1C */
 }
 
 static void test_exec(void)
 {
     mock_reset();
-    mock.status[0] = 1u << 16;                           /* stalled */
+    /* pe_isa.md 6.1: completion is FORCE_PENDING; STALLED is the program's */
+    mock.status[0] = 1u << 19;                           /* FORCE_PENDING */
     mock.stall_reads[0] = 3;
     EXPECT_EQ(pe_exec(0, 0xE001, 1000), PE_OK);
     uint32_t v;
     EXPECT(mock_last_write(EB(0, 0x20), &v) >= 0 && v == 0xE001u);
-    mock.status[0] = 1u << 16;
+    mock.status[0] = 1u << 16;                           /* program stalled: irrelevant */
+    EXPECT_EQ(pe_exec(0, 0xE001, 1000), PE_OK);
+    mock.status[0] = 1u << 19;
     mock.stall_reads[0] = 0;                             /* never completes */
     EXPECT_EQ(pe_exec(0, 0xE001, 1000), (unsigned long long)PE_ETIMEDOUT);
 }
@@ -337,16 +368,25 @@ static void test_events_and_irq(void)
 {
     mock_reset();
     pe_hal_init();
-    EXPECT_EQ(pe_evt_irq_enable(0x05), PE_OK);
     uint32_t v = 0;
+    EXPECT_EQ(pe_evt_irq_enable(0x05), PE_OK);
     EXPECT(mock_last_write(SH(0x10C), &v) >= 0 && v == 0x05u);
-    EXPECT_EQ(mock.mie, (1u << 16) | (1u << 18));        /* FW_IRQ_ID_PE_EVT(0), (2) */
-    EXPECT_EQ(pe_evt_irq_enable(0x80), PE_OK);
-    EXPECT(mock_last_write(SH(0x10C), &v) >= 0 && v == 0x85u);
+    EXPECT_EQ(mock.mie, (1u << 16) | (1u << 18));        /* IDs 16 + flag */
+    EXPECT_EQ(pe_fifo_irq_set(2, 1, 0), PE_OK);          /* engine 2 RX not empty */
+    EXPECT(mock_last_write(SH(0x10C), &v) >= 0 && v == (0x05u | 1u << 10));
+    EXPECT(mock.mie & (1u << 26));                       /* ID 24 + engine */
+    EXPECT_EQ(pe_fifo_irq_set(2, 1, 1), PE_OK);          /* + TX not full */
+    EXPECT(mock_last_write(SH(0x10C), &v) >= 0 && v == (0x05u | 1u << 10 | 1u << 14));
+    EXPECT_EQ(pe_evt_irq_enable(0x80), PE_OK);           /* RMW keeps the others */
+    EXPECT(mock_last_write(SH(0x10C), &v) >= 0 && v == (0x85u | 1u << 10 | 1u << 14));
     EXPECT_EQ(pe_evt_irq_disable(0x01), PE_OK);
+    EXPECT(mock_last_write(SH(0x10C), &v) >= 0 && v == (0x84u | 1u << 10 | 1u << 14));
+    EXPECT_EQ(pe_fifo_irq_set(2, 0, 0), PE_OK);
     EXPECT(mock_last_write(SH(0x10C), &v) >= 0 && v == 0x84u);
     EXPECT_EQ(mock.mie, (1u << 18) | (1u << 23));
     EXPECT_EQ(pe_evt_irq_enable(0x100), (unsigned long long)PE_EINVAL);
+    EXPECT_EQ(pe_fifo_irq_set(4, 1, 0), (unsigned long long)PE_EINVAL);
+    EXPECT_EQ(pe_fifo_irq_set(0, 2, 0), (unsigned long long)PE_EINVAL);
     pe_evt_set(0x1FF);
     EXPECT(mock_last_write(SH(0x104), &v) >= 0 && v == 0xFFu);
     pe_evt_clear(0x3);
@@ -361,41 +401,58 @@ static void test_pads(void)
     pe_hal_init();
     EXPECT_EQ(pe_pad_set_owner(7, PE_OWNER_CPU), (unsigned long long)PE_EINVAL);  /* input pad */
     EXPECT_EQ(pe_pad_set_owner(24, PE_OWNER_CPU), (unsigned long long)PE_EINVAL);
-    EXPECT_EQ(pe_pad_set_owner(9, PE_OWNER_SYSTEM), (unsigned long long)PE_EINVAL);
-    EXPECT_EQ(pe_pad_set_owner(9, 6), (unsigned long long)PE_EINVAL);
+    EXPECT_EQ(pe_pad_set_owner(9, 6), (unsigned long long)PE_EINVAL);  /* use NONE (7) */
     EXPECT_EQ(pe_pad_set_owner(9, 8), (unsigned long long)PE_EINVAL);
+    /* pad 23 is the host bridge's MISO: only the system may own it */
+    EXPECT_EQ(pe_pad_set_owner(23, PE_OWNER_CPU), (unsigned long long)PE_EINVAL);
+    EXPECT_EQ(pe_pad_set_owner(23, PE_OWNER_NONE), (unsigned long long)PE_EINVAL);
+    EXPECT_EQ(pe_pad_set_owner(23, PE_OWNER_PE(0)), (unsigned long long)PE_EINVAL);
+    EXPECT_EQ(mock_count_writes(SH(0x140 + 4 * (23 - 8))), 0);
+    EXPECT_EQ(pe_pad_set_owner(23, PE_OWNER_SYSTEM), PE_OK);
     EXPECT_EQ(pe_pad_set_owner(9, PE_OWNER_PE(3)), PE_OK);
     uint32_t v;
     EXPECT(mock_last_write(SH(0x140 + 4 * (9 - 8)), &v) >= 0 && v == 3u);
-    EXPECT_EQ(pe_pad_set_od(16, 1), (unsigned long long)PE_EINVAL);  /* uo_out: no OD */
+    EXPECT_EQ(pe_pad_owner(9), 3u);
+    EXPECT_EQ(pe_pad_owner(3), 0xFFu);
+    EXPECT_EQ(pe_pad_set_owner(16, PE_OWNER_SYSTEM), PE_OK);   /* back to sysctrl GPIO */
+    /* SET/CLR aliases: one write each, no read-modify-write */
+    EXPECT_EQ(pe_pad_set_od(16, 1), (unsigned long long)PE_EINVAL);   /* uo_out: no OD */
+    int nr = 0;
+    for (int i = 0; i < mock.nlog; i++)
+        nr += mock.log[i].op == 'R';
     EXPECT_EQ(pe_pad_set_od(9, 1), PE_OK);
-    EXPECT_EQ(pe_pad_set_od(15, 1), PE_OK);
-    EXPECT(mock_last_write(SH(0x118), &v) >= 0 && v == 0x82u);
+    EXPECT(mock_last_write(SH(0x138), &v) >= 0 && v == 0x02u);
+    EXPECT_EQ(pe_pad_set_od(15, 0), PE_OK);
+    EXPECT(mock_last_write(SH(0x13C), &v) >= 0 && v == 0x80u);
     EXPECT_EQ(pe_gpio_set_oe(23, 1), (unsigned long long)PE_EINVAL);
-    EXPECT_EQ(pe_gpio_write(23, 1), PE_OK);
-    EXPECT(mock_last_write(SH(0x11C), &v) >= 0 && v == 0x8000u);
+    EXPECT_EQ(pe_gpio_set_oe(10, 1), PE_OK);
+    EXPECT(mock_last_write(SH(0x130), &v) >= 0 && v == 0x04u);
+    EXPECT_EQ(pe_gpio_set_oe(10, 0), PE_OK);
+    EXPECT(mock_last_write(SH(0x134), &v) >= 0 && v == 0x04u);
+    EXPECT_EQ(pe_gpio_write(22, 1), PE_OK);
+    EXPECT(mock_last_write(SH(0x128), &v) >= 0 && v == 0x4000u);
+    EXPECT_EQ(pe_gpio_write(22, 0), PE_OK);
+    EXPECT(mock_last_write(SH(0x12C), &v) >= 0 && v == 0x4000u);
     EXPECT_EQ(pe_gpio_write(23, 2), (unsigned long long)PE_EINVAL);
+    int nr2 = 0;
+    for (int i = 0; i < mock.nlog; i++)
+        nr2 += mock.log[i].op == 'R';
+    EXPECT_EQ(nr2, nr);                                  /* none of these read */
 }
 
-static int idx_of(int from, uint32_t addr)
-{
-    for (int i = from; i < mock.nlog; i++)
-        if (mock.log[i].op == 'W' && mock.log[i].addr == addr)
-            return i;
-    return -1;
-}
-
-/* Must run before any other test touches HAL state: the HAL's shadow is
- * then all zero, as after .bss is cleared at boot. A panic at that point
- * must not take any pad (some may belong to the host bridge). */
+/* Safe state uses the hardware SAFE_STATE register (pe_isa.md 6.2): one
+ * write releases every non-system pad and disables every engine in the same
+ * cycle. Then IRQ_EN off. It must not depend on HAL state (it may run with
+ * corrupt RAM or before pe_hal_init()), so it is two constant writes. */
 static void test_safe_state_before_init(void)
 {
     mock_reset();
     pe_safe_state();
-    for (uint32_t pad = 8; pad <= 23; pad++)
-        EXPECT_EQ(mock_count_writes(SH(0x140 + 4 * (pad - 8))), 0);
-    for (uint32_t pe = 0; pe < 4; pe++)
-        EXPECT_EQ(mock_count_writes(EB(pe, 0)), 1);    /* engines still stopped */
+    EXPECT_EQ(mock.nlog, 2);
+    EXPECT_EQ(mock.log[0].addr, SH(0x114));
+    EXPECT_EQ(mock.log[0].value, 0x5AFEu);
+    EXPECT_EQ(mock.log[1].addr, SH(0x10C));
+    EXPECT_EQ(mock.log[1].value, 0u);
 }
 
 static void test_safe_state(void)
@@ -406,32 +463,16 @@ static void test_safe_state(void)
     pe_cfg_init(&c);
     pe_configure(1, &c);
     pe_start(1);
-    pe_pad_set_owner(9, PE_OWNER_PE(1));     /* I2C-style OD pad */
+    pe_pad_set_owner(9, PE_OWNER_PE(1));
     pe_pad_set_od(9, 1);
-    pe_pad_set_owner(18, PE_OWNER_PE(0));    /* uo_out pad */
-    pe_pad_set_owner(11, PE_OWNER_NONE);     /* released by firmware: leave alone */
-    /* pad 12 never assigned (could be the host bridge's): leave alone */
+    pe_evt_irq_enable(0x3);
     int n0 = mock.nlog;
     pe_safe_state();
-    int ctrl_last = -1;
-    for (uint32_t pe = 0; pe < 4; pe++) {
-        int i = idx_of(n0, EB(pe, 0));
-        EXPECT(i >= 0 && mock.log[i].value == 0);
-        if (i > ctrl_last)
-            ctrl_last = i;
-    }
-    int irq = idx_of(n0, SH(0x10C));
-    int own9 = idx_of(n0, SH(0x140 + 4 * 1)), own18 = idx_of(n0, SH(0x140 + 4 * 10));
-    int oe = idx_of(n0, SH(0x120)), od = idx_of(n0, SH(0x118)), out = idx_of(n0, SH(0x11C));
-    EXPECT(irq >= 0 && mock.log[irq].value == 0);
-    EXPECT(own9 > ctrl_last && mock.log[own9].value == PE_OWNER_CPU);   /* engines stopped first */
-    EXPECT(own18 > ctrl_last && mock.log[own18].value == PE_OWNER_CPU);
-    EXPECT_EQ(idx_of(n0, SH(0x140 + 4 * 3)), -1);                       /* pad 11 */
-    EXPECT_EQ(idx_of(n0, SH(0x140 + 4 * 4)), -1);                       /* pad 12 */
-    EXPECT(oe > own9 && oe > own18 && mock.log[oe].value == 0);         /* OE off while still OD */
-    EXPECT(od > oe && mock.log[od].value == 0);                         /* then leave OD */
-    EXPECT(out > od && mock.log[out].value == 0);
-    EXPECT_EQ(pe_enabled_mask(), 0u);
+    EXPECT_EQ(mock.nlog - n0, 2);
+    EXPECT_EQ(mock.log[n0].addr, SH(0x114));             /* SAFE_STATE first */
+    EXPECT_EQ(mock.log[n0].value, 0x5AFEu);
+    EXPECT_EQ(mock.log[n0 + 1].addr, SH(0x10C));
+    EXPECT_EQ(mock.log[n0 + 1].value, 0u);
 }
 
 static int encode_mode(void)
@@ -490,10 +531,12 @@ int main(int argc, char **argv)
     test_configure_start_stop();
     test_load_program();
     test_fifos();
+    test_engine_ctrl_mask();
     test_exec();
     test_events_and_irq();
     test_pads();
     test_safe_state();
+    EXPECT_EQ(mock.irq_depth, 0);                        /* critical sections balanced */
     printf("test_pe_hal: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

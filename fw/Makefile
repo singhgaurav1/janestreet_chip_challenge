@@ -67,16 +67,23 @@ APPS    := $(notdir $(wildcard apps/*))
 
 # Per-app extras: apps/<app>/app.mk may set <app>_SRC_EXTRA, <app>_CFLAGS,
 # <app>_HAL (=1 to link the PE HAL) and <app>_VARIANTS (builds <app>-<v>
-# with -DVARIANT=<v>).
+# with -DVARIANT=<v>). Every apps/<app>/<name>.pe is assembled with the PE
+# assembler (tools/peemu) into <name>_pe.h on the app's include path.
+PEASM := PYTHONPATH=$(abspath $(CURDIR)/../tools) $(PYTHON) -m peemu asm
 -include $(wildcard apps/*/app.mk)
 
 define app_rules
 # $(1) image name, $(2) app dir, $(3) extra cflags
+$(BUILD)/gen-$(1)/%_pe.h: apps/$(2)/%.pe
+	@mkdir -p $$(@D)
+	@$(PEASM) $$< -f c -o $$@
 $(BUILD)/$(1).elf: $(RT_SRC) $(if $($(2)_HAL),$(HAL_SRC)) $(wildcard apps/$(2)/*.c) $($(2)_SRC_EXTRA) \
+                   $(patsubst apps/$(2)/%.pe,$(BUILD)/gen-$(1)/%_pe.h,$(wildcard apps/$(2)/*.pe)) \
                    link/fw.ld $(wildcard include/*.h src/*.h) Makefile
-	@mkdir -p $(BUILD)/obj-$(1)
+	@mkdir -p $(BUILD)/obj-$(1) $(BUILD)/gen-$(1)
 	@echo "CC  $(1) [$(ARCH), RAM $(RAM_SIZE)]"
 	@cd $(BUILD)/obj-$(1) && $(CC) $(CFLAGS) $($(2)_CFLAGS) $(3) -I$(CURDIR)/include -I$(CURDIR)/src \
+	  -I$(CURDIR)/$(BUILD)/gen-$(1) \
 	  -c $(addprefix $(CURDIR)/,$(RT_SRC) $(if $($(2)_HAL),$(HAL_SRC)) $(wildcard apps/$(2)/*.c) $($(2)_SRC_EXTRA))
 	@$(CC) $(LDFLAGS) -Wl,-Map=$(BUILD)/$(1).map -o $$@ $(BUILD)/obj-$(1)/*.o $(LIBS)
 $(BUILD)/$(1).hex: $(BUILD)/$(1).elf scripts/mkimage.py

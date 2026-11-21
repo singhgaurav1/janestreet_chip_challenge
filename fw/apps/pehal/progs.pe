@@ -1,0 +1,18 @@
+; Engine programs for fw/apps/pehal (HAL test on the chip's PE block).
+
+.program forced
+; Single instructions, force-executed one at a time through INSTR.
+    set y, 21          ; 0
+    mov isr, y         ; 1
+    push noblock       ; 2
+    push block         ; 3
+    pull noblock       ; 4
+
+.program filler
+; Fills the RX FIFO with 5s, then stalls on the blocking push.
+    set y, 5
+    mov isr, y
+.wrap_target
+    push block
+    mov isr, y
+.wrap

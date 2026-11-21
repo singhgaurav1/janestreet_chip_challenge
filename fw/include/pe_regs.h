@@ -1,6 +1,6 @@
 /*
  * Protocol Engine registers, transcribed from docs/pe_isa.md section 6
- * ("CPU register map (draft)"). Written from the spec only.
+ * ("CPU register map", v1 2026-11-21). Written from the spec only.
  *
  * This file is replaced by the generated fw/include/regs.h when F1 lands.
  * Naming convention (proposed to the RTL chat for the YAML generator, so the
@@ -8,11 +8,7 @@
  *   PE_<REG>_OFF                 byte offset of a per-engine register
  *   PE_<REG>_<FIELD>_LSB/_WIDTH  field position
  *   PE_SH_<REG>_OFF              byte offset of a shared register (from PE_SHARED_BASE)
- *
- * Status of each part:
- *   per-engine offsets and fields   SPEC (pe_isa.md section 6)
- *   shared-block offsets/packing    STUB (section 6 lists the registers but
- *                                   gives no offsets or field packing)
+ * Every offset and field here is SPEC (no stubs left).
  */
 #ifndef FW_PE_REGS_H
 #define FW_PE_REGS_H
@@ -138,29 +134,50 @@
 #define PE_STATUS_TXLEVEL_WIDTH     4
 #define PE_STATUS_RXLEVEL_LSB       12
 #define PE_STATUS_RXLEVEL_WIDTH     4
-#define PE_STATUS_STALLED_LSB       16
+#define PE_STATUS_STALLED_LSB       16  /* the program, not a forced instruction */
+#define PE_STATUS_TXOVF_LSB         17  /* sticky, W1C: push into a full TX FIFO */
+#define PE_STATUS_RXUNF_LSB         18  /* sticky, W1C: pop from an empty RX FIFO */
+#define PE_STATUS_FORCE_PENDING_LSB 19  /* forced instruction not yet completed */
+#define PE_STATUS_W1C_MASK  ((1u << PE_STATUS_SERR_LSB) | (1u << PE_STATUS_OVF_LSB) | \
+                             (1u << PE_STATUS_TXOVF_LSB) | (1u << PE_STATUS_RXUNF_LSB))
 
-/* ---- Shared block (STUB offsets and packing; register list is SPEC) ---- */
-#define PE_SH_IMEM_OFF        0x000u   /* 64 x 32-bit slots, low 16 bits used */
-#define PE_SH_EVT_OFF         0x100u   /* R/W: 8 event flags */
-#define PE_SH_EVT_SET_OFF     0x104u   /* W1S alias */
-#define PE_SH_EVT_CLR_OFF     0x108u   /* W1C alias */
-#define PE_SH_IRQ_EN_OFF      0x10Cu   /* [7:0]: event flag n raises its IRQ */
-/* One owner register per pad: changing one pad never rewrites another (no
- * read-modify-write of a register the spec does not say is readable). */
-#define PE_SH_PAD_OWNER_OFF(pad) (0x140u + 4u * ((pad) - 8u))  /* pads 8..23, [2:0] */
-#define PE_SH_PAD_OD_OFF      0x118u   /* [7:0]: OD for pads 8..15 */
-#define PE_SH_GPIO_OUT_OFF    0x11Cu   /* [15:0]: CPU GPIO level, pads 8..23 */
-#define PE_SH_GPIO_OE_OFF     0x120u   /* [7:0]: CPU GPIO OE, pads 8..15 */
+/* ---- Shared block (pe_isa.md 6.2), offsets from PE_SHARED_BASE ---- */
+#define PE_SH_IMEM_OFF        0x000u   /* 64 x 32-bit slots, [15:0] */
+#define PE_SH_EVT_OFF         0x100u   /* RW: 8 event flags */
+#define PE_SH_EVT_SET_OFF     0x104u   /* W1S */
+#define PE_SH_EVT_CLR_OFF     0x108u   /* W1C */
+#define PE_SH_IRQ_EN_OFF      0x10Cu   /* RW */
+#define PE_SH_ENGINE_CTRL_OFF 0x110u   /* [3:0] EN (RW), [7:4] RESTART, [11:8] DIV_RESTART (W1) */
+#define PE_SH_SAFE_STATE_OFF  0x114u   /* W PE_SAFE_STATE_KEY */
+#define PE_SH_PAD_OD_OFF      0x118u   /* RW [7:0]: pads 8..15 */
+#define PE_SH_GPIO_OUT_OFF    0x11Cu   /* RW [15:0]: pads 8..23, CPU-owned only */
+#define PE_SH_GPIO_OE_OFF     0x120u   /* RW [7:0]: pads 8..15, CPU-owned only */
+#define PE_SH_PAD_STATE_OFF   0x124u   /* R: [15:0] levels 8..23, [23:16] OE 8..15 */
+#define PE_SH_GPIO_OUT_SET_OFF 0x128u
+#define PE_SH_GPIO_OUT_CLR_OFF 0x12Cu
+#define PE_SH_GPIO_OE_SET_OFF  0x130u
+#define PE_SH_GPIO_OE_CLR_OFF  0x134u
+#define PE_SH_PAD_OD_SET_OFF   0x138u
+#define PE_SH_PAD_OD_CLR_OFF   0x13Cu
+#define PE_SH_PAD_OWNER_OFF(pad) (0x140u + 4u * ((pad) - 8u))  /* pads 8..23, [2:0] RW */
+
+#define PE_IRQ_EN_EVT_LSB     0        /* [7:0] flag n raises line n */
+#define PE_IRQ_EN_RXNE_LSB    8        /* [11:8] engine n RX not empty -> line 8+n */
+#define PE_IRQ_EN_TXNF_LSB    12       /* [15:12] engine n TX not full -> line 8+n */
+#define PE_ENGINE_CTRL_EN_LSB      0
+#define PE_ENGINE_CTRL_RESTART_LSB 4
+#define PE_ENGINE_CTRL_DIVRST_LSB  8
+#define PE_SAFE_STATE_KEY     0x5AFEu
 
 #define PE_PAD_FIRST_DRIVEABLE 8u
 #define PE_PAD_LAST_DRIVEABLE  23u
 #define PE_PAD_LAST_BIDIR      15u
+#define PE_PAD_HOST_MISO       23u     /* docs/soc.md: keep with the system */
 
-/* Pad owner codes (SPEC, pe_isa.md 2.2) */
+/* Pad owner codes (pe_isa.md 6.2) */
 #define PE_OWNER_PE(n)   (n)
 #define PE_OWNER_CPU     4u
-#define PE_OWNER_SYSTEM  5u
-#define PE_OWNER_NONE    7u
+#define PE_OWNER_SYSTEM  5u            /* reset value on this chip (docs/soc.md) */
+#define PE_OWNER_NONE    7u            /* 6 and 7: released */
 
 #endif /* FW_PE_REGS_H */

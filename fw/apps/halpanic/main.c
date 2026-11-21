@@ -1,8 +1,10 @@
 /*
  * HAL on the real core: configure and start an engine, hand pads to it, then
  * panic. Run with the testbench's +pe_stub; fw/tests/run_fw_tests.py checks
- * the logged register writes (configuration image, start sequence, and the
- * safe-state order after the panic). The stub is not an engine model.
+ * the logged register writes (configuration image, start, and the safe
+ * state after the panic). The stub is not an engine model: its reads return
+ * 0, so behaviour that depends on readback is tested on the chip
+ * (apps/pehal) instead.
  */
 #include <stdint.h>
 
@@ -26,6 +28,5 @@ int main(void)
     FW_ASSERT(pe_pad_set_owner(9, PE_OWNER_PE(1)) == PE_OK);
     FW_ASSERT(pe_pad_set_od(9, 1) == PE_OK);
     FW_ASSERT(pe_start(1) == PE_OK);
-    FW_ASSERT(pe_load_program(10, prog, 1) == PE_EBUSY);  /* engine 1 uses it now */
     fw_panic(FW_PANIC_USER, 0x5AFE);
 }
