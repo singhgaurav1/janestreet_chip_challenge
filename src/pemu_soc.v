@@ -2,9 +2,15 @@
  * Copyright (c) 2026 singhgaurav1
  * SPDX-License-Identifier: Apache-2.0
  *
- * Protocol emulator SoC (skeleton): Ibex (RV32IMC) + 4 KiB SRAM + system
- * control/GPIO + host SPI bridge. The Protocol Engine block attaches at
- * 0x1000_1000 in a later step. Address map and pins: docs/soc.md.
+ * Protocol emulator SoC: Ibex (RV32IMC) + 4 KiB SRAM + system control/GPIO
+ * + host SPI bridge + Protocol Engine block (0x1000_1000). Address map and
+ * pins: docs/soc.md.
+ *
+ * Pads (docs/pe_isa.md 2.2): 0-7 = ui_in, 8-15 = uio, 16-23 = uo_out. Each
+ * driveable pad (8-23) has an owner in the PE block. Owner "system" (the
+ * reset value) means the SoC drives it: pad 23 from the host bridge (MISO),
+ * pads 8-22 from the sysctrl GPIO registers. Engines and the PE block's CPU
+ * GPIO drive the pads firmware assigns to them.
  *
  * Boot: after reset the CPU is held in reset. The host loads the firmware
  * over SPI, then sets CTRL.run. Ibex starts at 0x80 (boot_addr 0).
@@ -22,7 +28,7 @@ module pemu_soc (
     // GPIO
     input  wire [7:0] ui_in,
     input  wire [7:0] uio_in,
-    output wire [6:0] gpio_out,
+    output wire [7:0] uo_out,
     output wire [7:0] uio_out,
     output wire [7:0] uio_oe
 );
@@ -30,12 +36,14 @@ module pemu_soc (
 
   // ---- host bridge --------------------------------------------------------
   wire        cpu_run, cpu_sleep;
+  wire        host_miso_int;
+  wire [11:0] pe_irq;              // PE block interrupt lines
   wire        h_req, h_we, h_gnt, h_rvalid, h_err;
   wire [31:0] h_addr, h_wdata, h_rdata;
 
   pemu_host_spi u_host (
       .clk(clk), .rst_n(rst_n),
-      .sck(host_sck), .cs_n(host_cs_n), .mosi(host_mosi), .miso(host_miso),
+      .sck(host_sck), .cs_n(host_cs_n), .mosi(host_mosi), .miso(host_miso_int),
       .cpu_run(cpu_run), .cpu_sleep(cpu_sleep),
       .bus_req(h_req), .bus_addr(h_addr), .bus_we(h_we), .bus_wdata(h_wdata),
       .bus_gnt(h_gnt), .bus_rvalid(h_rvalid), .bus_rdata(h_rdata)
@@ -70,7 +78,8 @@ module pemu_soc (
       .trvk_revbm_req_o(), .trvk_revbm_gnt_i(1'b0), .trvk_revbm_rvalid_i(1'b0),
       .trvk_revbm_addr_o(), .trvk_revbm_rdata_i(32'h0), .trvk_revbm_rdata_intg_i(7'h0),
       .trvk_revbm_err_i(1'b0),
-      .irq_software_i(1'b0), .irq_timer_i(1'b0), .irq_external_i(1'b0), .irq_fast_i(15'h0),
+      .irq_software_i(1'b0), .irq_timer_i(1'b0), .irq_external_i(1'b0),
+      .irq_fast_i({3'b000, pe_irq}),       // IDs 16-23 event flags, 24-27 engine FIFOs
       .irq_nm_i(1'b0),
       .scramble_key_valid_i(1'b0), .scramble_key_i(128'h0), .scramble_nonce_i(64'h0),
       .scramble_req_o(),
@@ -92,6 +101,7 @@ module pemu_soc (
   wire [15:0] per_addr;
   wire [3:0]  per_be;
   wire [31:0] per_wdata, per_rdata;
+  wire        per_err;
 
   pemu_bus #(.SRAM_AW(10)) u_bus (
       .clk(clk), .rst_n(rst_n),
@@ -104,7 +114,7 @@ module pemu_soc (
       .sram_en(sram_en), .sram_we(sram_we), .sram_addr(sram_addr), .sram_wdata(sram_wdata),
       .sram_be(sram_be), .sram_rdata(sram_rdata),
       .per_en(per_en), .per_we(per_we), .per_addr(per_addr), .per_wdata(per_wdata),
-      .per_be(per_be), .per_rdata(per_rdata)
+      .per_be(per_be), .per_rdata(per_rdata), .per_err(per_err)
   );
 
   pemu_sram u_sram (
@@ -113,22 +123,49 @@ module pemu_soc (
   );
 
   // ---- peripherals: 4 KiB windows selected by per_addr[15:12] ---------------
+  wire [6:0]  sys_gpio_out;               // sysctrl GPIO: drives system-owned pads
+  wire [7:0]  sys_uio_out, sys_uio_oe;
+
+  // A window with no peripheral answers with a bus error.
   wire        sys_sel = per_addr[15:12] == 4'h0;
-  wire [31:0] sys_rdata;
-  reg         sys_sel_q;
+  wire        pe_sel  = per_addr[15:12] == 4'h1;
+  wire [31:0] sys_rdata, pe_rdata;
+  wire        sys_err, pe_err;
+  reg  [1:0]  sel_q;                       // {pe, sys} of the access last cycle
   always @(posedge clk or negedge rst_n)
-    if (!rst_n) sys_sel_q <= 1'b0;
-    else if (per_en) sys_sel_q <= sys_sel;
-  assign per_rdata = sys_sel_q ? sys_rdata : 32'h0;
+    if (!rst_n) sel_q <= 2'b00;
+    else if (per_en) sel_q <= {pe_sel, sys_sel};
+  assign per_rdata = sel_q[0] ? sys_rdata : sel_q[1] ? pe_rdata : 32'h0;
+  assign per_err   = sel_q[0] ? sys_err   : sel_q[1] ? pe_err   : 1'b1;
 
   pemu_sysctrl u_sys (
       .clk(clk), .rst_n(rst_n),
       .en(per_en & sys_sel), .we(per_we), .addr(per_addr[11:0]), .wdata(per_wdata),
-      .be(per_be), .rdata(sys_rdata),
+      .be(per_be), .rdata(sys_rdata), .err(sys_err),
       .ui_in(ui_in), .uio_in(uio_in),
-      .gpio_out(gpio_out), .uio_out(uio_out), .uio_oe(uio_oe)
+      .gpio_out(sys_gpio_out), .uio_out(sys_uio_out), .uio_oe(sys_uio_oe)
   );
 
-  // unused bus status (kept for the PE block and debug in later steps)
-  wire unused = h_err;
+  // ---- Protocol Engine block (docs/pe_isa.md) -------------------------------
+  wire [7:0]  pe_uo_out, pe_uio_out, pe_uio_oe, pe_flags;
+  wire [15:0] pad_sys;                     // pads 8..23 owned by the system
+
+  pe_block #(.OWNER_RESET({16{3'd5}})) u_pe (
+      .clk(clk), .rst_n(rst_n),
+      .en(per_en & pe_sel), .we(per_we), .addr(per_addr[11:0]), .wdata(per_wdata),
+      .rdata(pe_rdata), .err(pe_err),
+      .ui_in(ui_in), .uio_in(uio_in),
+      .uo_out(pe_uo_out), .uio_out(pe_uio_out), .uio_oe(pe_uio_oe),
+      .pad_sys(pad_sys), .flags_out(pe_flags), .irq(pe_irq)
+  );
+
+  // ---- pad multiplex: system-owned pads come from the SoC -------------------
+  wire [7:0] sys_uo = {host_miso_int, sys_gpio_out};
+  assign uo_out    = (pad_sys[15:8] & sys_uo)      | (~pad_sys[15:8] & pe_uo_out);
+  assign uio_out   = (pad_sys[7:0]  & sys_uio_out) | (~pad_sys[7:0]  & pe_uio_out);
+  assign uio_oe    = (pad_sys[7:0]  & sys_uio_oe)  | (~pad_sys[7:0]  & pe_uio_oe);
+  assign host_miso = host_miso_int;        // also exported for debug benches
+
+  // unused bus status and flags (flags are visible to firmware via EVT)
+  wire unused = h_err | (|pe_flags);
 endmodule

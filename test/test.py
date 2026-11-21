@@ -113,6 +113,136 @@ async def test_host_bridge(dut):
     assert await host.status() & 0x0C == 0, "no bridge overrun/underrun"
 
 
+ST_RUN, ST_SLEEP, ST_OVERRUN, ST_UNDERRUN, ST_RUN_REFUSED = 0x01, 0x02, 0x04, 0x08, 0x10
+
+
+async def wait_result(dut, host, polls: int = 40, every: int = 500) -> int:
+    """Poll SCRATCH over the bridge until the runtime posts a result (odd value)."""
+    result = 0
+    for _ in range(polls):
+        await ClockCycles(dut.clk, every)
+        result = (await host.read(SYS_SCRATCH))[0]
+        if result & 1:
+            break
+    return result
+
+
+@cocotb.test()
+async def test_boot_guard(dut):
+    """The bridge starts the CPU only after an SRAM load since the last start."""
+    await reset(dut)
+    host = HostSPI(dut)
+    await host.ctrl(1)                                    # nothing loaded since reset
+    st = await host.status()
+    assert st & ST_RUN == 0 and st & ST_RUN_REFUSED, f"start without a load must be refused ({st:#x})"
+    await host.write(SYS_SCRATCH, [1])                    # a peripheral write is not a load
+    await host.ctrl(1)
+    assert await host.status() & (ST_RUN | ST_RUN_REFUSED) == ST_RUN_REFUSED
+    await host.write(0x80, [0x0000006F])                  # SRAM load: "j ." at the reset vector
+    await host.ctrl(1)
+    st = await host.status()
+    assert st & ST_RUN and not st & ST_RUN_REFUSED, f"start after a load ({st:#x})"
+    await host.ctrl(1)                                    # already running: no change, no refusal
+    assert await host.status() & (ST_RUN | ST_RUN_REFUSED) == ST_RUN
+    await host.ctrl(0)                                    # stopping is always allowed
+    assert await host.status() & ST_RUN == 0
+    await host.ctrl(1)                                    # restart needs a new load
+    st = await host.status()
+    assert st & ST_RUN == 0 and st & ST_RUN_REFUSED
+    await host.write(0x80, [0x0000006F])
+    await host.ctrl(1)
+    assert await host.status() & (ST_RUN | ST_RUN_REFUSED) == ST_RUN
+    await host.ctrl(0)
+
+
+@cocotb.test()
+async def test_sysval_buserr(dut):
+    """Unmapped addresses fault on the CPU (above the 4 KiB SRAM, unused sysctrl
+    offsets, empty peripheral windows, outside both regions); mapped ones do not."""
+    await reset(dut)
+    host = HostSPI(dut)
+    image = load_image("buserr")
+    await host.write(0, image)
+    await host.ctrl(1)
+    result = await wait_result(dut, host, polls=80, every=5000)
+    if result != 1:
+        st = await host.read(RAM_BYTES - 64, 16)
+        dut._log.info("status block " + " ".join(f"{w:08x}" for w in st))
+    assert result == 1, f"firmware reported {result_text(result)} (0x{result:08x})"
+    # the host bridge reads 0 from unmapped addresses (and keeps working)
+    assert await host.read(0x1000_0040) == [0]
+    assert await host.read(0x2000_0000) == [0]
+    assert (await host.read(0x1000_0000))[0] == 0x50454D55
+
+
+UART_BIT = 32                        # system clocks per bit (pe_uart: CLKDIV INT 4, 8 ticks/bit)
+
+
+async def uart_send(dut, host, data: bytes):
+    """Drive ui_in[0] (pad 0) as a UART line, 8N1, LSB first."""
+    def line(v):
+        host.pins = (host.pins & ~1) | v
+        host._drive()
+    for b in data:
+        for bit in [0] + [(b >> i) & 1 for i in range(8)] + [1]:
+            line(bit)
+            await ClockCycles(dut.clk, UART_BIT)
+        await ClockCycles(dut.clk, UART_BIT)          # one extra idle bit between bytes
+
+
+async def uart_receive(dut, count: int, out: list):
+    """Decode uo_out[0] (pad 16): wait for idle-high first (the pad is low while
+    the system owns it), then sample each bit in its middle."""
+    def tx():
+        return int(dut.uo_out.value) & 1
+    while not tx():
+        await ClockCycles(dut.clk, 1)
+    while len(out) < count:
+        while tx():
+            await ClockCycles(dut.clk, 1)
+        await ClockCycles(dut.clk, UART_BIT // 2)
+        assert tx() == 0, "start bit glitch"
+        b = 0
+        for i in range(8):
+            await ClockCycles(dut.clk, UART_BIT)
+            b |= tx() << i
+        await ClockCycles(dut.clk, UART_BIT)
+        assert tx() == 1, f"framing error after 0x{b:02x}"
+        out.append(b)
+
+
+@cocotb.test()
+async def test_sysval_pe_uart(dut):
+    """Ibex runs a UART on the Protocol Engines: TX on engine 0 (uo_out[0]),
+    RX on engine 1 (ui_in[0]); every byte sent is echoed back."""
+    await reset(dut)
+    host = HostSPI(dut)
+    host.pins |= 1                                       # RX line idle high
+    host._drive()
+    image = load_image("pe_uart")
+    await host.write(0, image)
+    await host.ctrl(1)
+    for _ in range(100):                                 # firmware posts 2 when ready
+        await ClockCycles(dut.clk, 5000)
+        r = (await host.read(SYS_SCRATCH))[0]
+        if r == 2 or r & 1:
+            break
+    assert r == 2, f"firmware not ready: {result_text(r) if r & 1 else hex(r)}"
+
+    msg = b"Hi PE \x00\xff\x55\n"
+    got: list = []
+    rx = cocotb.start_soon(uart_receive(dut, len(msg), got))
+    await uart_send(dut, host, msg)
+    await ClockCycles(dut.clk, 12 * UART_BIT)
+    await rx
+    dut._log.info(f"echoed {bytes(got)!r}")
+    assert bytes(got) == msg
+    result = await wait_result(dut, host)
+    assert result == 1, f"firmware reported {result_text(result)} (0x{result:08x})"
+    # after SAFE_STATE the engine pad is released and the host bridge still works
+    assert int(dut.uo_out.value) & 1 == 0
+
+
 @cocotb.test()
 async def test_sysval_smoke(dut):
     """Load system_validation/tests/smoke over SPI, run it on Ibex, answer its
@@ -139,12 +269,7 @@ async def test_sysval_smoke(dut):
     host.pins |= 0x15
     host._drive()
 
-    result = 0
-    for _ in range(40):
-        await ClockCycles(dut.clk, 500)
-        result = (await host.read(SYS_SCRATCH))[0]       # peek while the CPU runs
-        if result & 1:
-            break
+    result = await wait_result(dut, host)                 # peeks while the CPU runs
     dut._log.info(f"firmware result 0x{result:08x} ({result_text(result)})")
     assert result == 1, f"firmware reported {result_text(result)}"
     # after exit the runtime puts the pins in their safe state and sleeps

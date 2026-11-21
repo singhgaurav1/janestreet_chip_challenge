@@ -1,16 +1,23 @@
-# Area budget (2026-11-18)
+# Area budget (2026-11-18, budget raised 2026-11-21)
 
 Measured with Yosys on IHP SG13CMOS5L standard cells (typical corner), before
 placement. Die: 8×4 tiles ≈ 1.0 mm²; CMOS5L routes on Metal1–4 plus TopMetal1,
 and the first full build already reported routing congestion at ~34 %
-utilization. Planning ceiling: **~0.60 mm² of cells + macros**.
+utilization.
+
+**Budget: 0.95 mm² of cells + macros (owner, 2026-11-21, for now).** It
+replaces the earlier ~0.60 mm² planning ceiling so the full design can go
+through layout. Risk: that is ~95 % of the die before routing, far above
+the ~34 % at which the first build already reported congestion, so the
+layout run will show whether it places and routes. If it does not, the
+options below apply.
 
 | Block | Area | Source |
 |---|---|---|
 | Ibex `small` (RV32IMC) + SoC glue | 0.253 mm² | `syn/ibex/out/soc.stat` |
 | SRAM 1024×32 macro (4 KiB; was 512×32, 0.080) | 0.140 mm² | LEF 416.64 × 336.46 µm |
 | **Protocol Engine block, after rework** | **0.516 mm²** (was 0.631) | `pe_block` synthesis |
-| Total | ~0.91 mm² | does not fit |
+| Total | ~0.91 mm² | within the 0.95 mm² budget; routability unproven |
 
 The plan estimated 2–3k cells per engine. The verified RTL (`src/pe_engine.v`,
 lockstep-equal to the golden model) is about 11k cells per engine.

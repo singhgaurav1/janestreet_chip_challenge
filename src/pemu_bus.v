@@ -5,9 +5,11 @@
  * System bus: Ibex-style req/gnt/rvalid, three masters, two targets.
  *
  *   masters (priority high -> low): m0 host bridge, m1 CPU data, m2 CPU instruction
- *   0x0xxx_xxxx  SRAM        (word address = addr[SRAM_AW+1:2], aliases above its size)
- *   0x1xxx_xxxx  peripherals (addr[15:0] to the peripheral block)
- *   other        no target: granted, answered with rdata 0 and err
+ *   0x0000_0000 .. SRAM size - 1   SRAM (word address = addr[SRAM_AW+1:2])
+ *   0x1000_0000 .. 0x1000_FFFF     peripherals (addr[15:0]); the peripheral
+ *                                  block reports err for offsets it does not map
+ *   anything else                  no target: granted, answered with rdata 0 and err
+ * So a wild pointer past the end of RAM faults instead of wrapping.
  *
  * Every target answers exactly one cycle after the grant, so each master can
  * have a request in flight every cycle and responses never need reordering.
@@ -60,13 +62,15 @@ module pemu_bus #(
     output wire [15:0]        per_addr,
     output wire [31:0]        per_wdata,
     output wire [3:0]         per_be,
-    input  wire [31:0]        per_rdata
+    input  wire [31:0]        per_rdata,
+    input  wire               per_err     // with per_rdata: the access hit no register
 );
   localparam [1:0] T_SRAM = 2'd0, T_PER = 2'd1, T_NONE = 2'd2;
 
   function [1:0] target;
     input [31:0] a;
-    target = (a[31:28] == 4'h0) ? T_SRAM : (a[31:28] == 4'h1) ? T_PER : T_NONE;
+    target = (a[31:SRAM_AW+2] == 0)    ? T_SRAM :
+             (a[31:16] == 16'h1000)     ? T_PER  : T_NONE;
   endfunction
 
   wire [1:0] t0 = target(m0_addr);
@@ -121,7 +125,7 @@ module pemu_bus #(
   assign m0_rdata = (r0 == T_SRAM) ? sram_rdata : (r0 == T_PER) ? per_rdata : 32'h0;
   assign m1_rdata = (r1 == T_SRAM) ? sram_rdata : (r1 == T_PER) ? per_rdata : 32'h0;
   assign m2_rdata = (r2 == T_SRAM) ? sram_rdata : 32'h0;
-  assign m0_err   = m0_rvalid & (r0 == T_NONE);
-  assign m1_err   = m1_rvalid & (r1 == T_NONE);
+  assign m0_err   = m0_rvalid & ((r0 == T_NONE) | ((r0 == T_PER) & per_err));
+  assign m1_err   = m1_rvalid & ((r1 == T_NONE) | ((r1 == T_PER) & per_err));
   assign m2_err   = m2_rvalid & (r2 == T_NONE);
 endmodule

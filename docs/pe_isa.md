@@ -410,29 +410,98 @@ cycle (the FIFO has one write port), the record is dropped and `OVF` is set.
 The program may keep running but should not push. This is the on-chip logic
 analyzer and the capture path for unknown protocols.
 
-## 6. CPU register map (draft)
+## 6. CPU register map
 
-Per engine `n`, base `0x100 * n` within the PE block. Field packing is a
-draft; RTL may refine it, the semantics above are fixed.
+The PE block is a 4 KiB window (`0x1000_1000` on the chip, `docs/soc.md`).
+Word accesses only. **Any offset not listed answers with a bus error.**
+Writes to read-only registers and reads of write-only ones are ignored and
+read 0, without an error. Fields not listed read 0.
+
+### 6.1 Per engine `n`, base `0x100 * n`
 
 | Offset | Register | Fields |
 |---|---|---|
-| `0x00` | `CTRL` | `[0]` EN, `[1]` RESTART (W1, clears counters, `PC←0`), `[2]` DIV_RESTART (W1) |
+| `0x00` | `CTRL` | `[0]` EN (RW), `[1]` RESTART (W1), `[2]` DIV_RESTART (W1) |
 | `0x04` | `CLKDIV` | `[31:16]` INT, `[15:8]` FRAC |
 | `0x08` | `EXECCTRL` | `[4:0]` WRAP_BOTTOM, `[9:5]` WRAP_TOP, `[14:10]` JMP_PIN, `[15]` FILTER, `[17:16]` SYNC_EDGE, `[18]` AUTOSYNC, `[21:19]` SIDE_COUNT, `[22]` SIDE_OPT, `[23]` SIDE_PINDIR, `[29:24]` ORIGIN |
 | `0x0C` | `SHIFTCTRL` | `[0]` IN_SHIFTDIR (1 = right), `[1]` OUT_SHIFTDIR, `[2]` AUTOPUSH, `[3]` AUTOPULL, `[8:4]` PUSH_THRESH (0 = 32), `[13:9]` PULL_THRESH (0 = 32) |
-| `0x10` | `PINCTRL` | `[4:0]` OUT_BASE, `[10:5]` OUT_COUNT (0–32), `[15:11]` SET_BASE, `[18:16]` SET_COUNT, `[23:19]` SIDE_BASE, `[28:24]` IN_BASE |
+| `0x10` | `PINCTRL` | `[4:0]` OUT_BASE, `[10:5]` OUT_COUNT (0–32), `[15:11]` SET_BASE, `[18:16]` SET_COUNT (0–5), `[23:19]` SIDE_BASE, `[28:24]` IN_BASE |
 | `0x14` | `ASSIST` | `[1:0]` CODER_MODE, `[2]` CODER_DIFF, `[3]` CODER_IDLE, `[5:4]` STUFF_MODE, `[8:6]` STUFF_N−1, `[12:9]` BIT_TICKS−1, `[17:13]` CRC_WIDTH−1, `[18]` CRC_INIT_ONES, `[19]` STAMP_EN, `[23:20]` STAMP_COUNT−1, `[24]` CRC_REFLECT |
 | `0x18` | `CRC_POLY` | `[31:0]` |
-| `0x1C` | `TIMING` | `[15:0]` TIMEOUT (ticks, 0 = off), `[31:16]` SYNC_PHASE |
-| `0x20` | `INSTR` | W: force-execute; R: current instruction |
-| `0x24` | `TXF` | W: push TX FIFO |
-| `0x28` | `RXF` | R: pop RX FIFO |
-| `0x2C` | `STATUS` | `[4:0]` PC, `[5]` T, `[6]` SERR (W1C), `[7]` OVF (W1C), `[11:8]` TX level, `[15:12]` RX level, `[16]` stalled |
+| `0x1C` | `TIMING` | `[15:0]` TIMEOUT (ticks, 0 = off), `[31:16]` SYNC_PHASE (< INT) |
+| `0x20` | `INSTR` | W: force-execute `[15:0]`; R: the instruction at `ORIGIN + PC` |
+| `0x24` | `TXF` | W: push. Dropped when full, which sets TXOVF |
+| `0x28` | `RXF` | R: pop. Reads 0 when empty, which sets RXUNF |
+| `0x2C` | `STATUS` | R: `[4:0]` PC, `[5]` T, `[6]` SERR, `[7]` OVF, `[11:8]` TX level, `[15:12]` RX level, `[16]` STALLED, `[17]` TXOVF, `[18]` RXUNF, `[19]` FORCE_PENDING. W: 1 clears SERR, OVF, TXOVF, RXUNF |
 
-Shared, base `0x400`: `IMEM[0..63]` (16-bit, write-only while the engines
-using it are disabled), `EVT` (R/W, plus W1S/W1C aliases), `IRQ_EN`,
-`PAD_OWNER[8..23]` (3 bits each), `PAD_OD[8..15]`, CPU GPIO `OUT`/`OE`.
+Configuration registers keep only the listed bits. They may be written at
+any time and take effect from the next cycle; change them while the engine
+is disabled unless a program is written for it.
+
+**`CTRL`.** A write sets EN and, in the same cycle, applies RESTART and
+DIV_RESTART if their bits are 1. They land between cycles (section 4):
+- RESTART sets PC to 0 and clears the in-progress state: ISR and OSR shift
+  counts (ISR count 0, OSR count 32 = empty), delay, WAIT timeout counter,
+  pending `evt wait`, armed `sync`, the CRC/stuffer/coder enables and their
+  running state. It keeps the FIFOs, X, Y, the ISR/OSR contents, T, the CRC
+  value, the error flags, the divider and the configuration.
+- DIV_RESTART clears the divider counter and fraction accumulator, so the
+  next cycle is a tick.
+- So `EN|RESTART|DIV_RESTART` in one write starts a program cleanly at
+  instruction 0 with the first tick on the next cycle.
+
+**`INSTR` (forced instruction).** The instruction executes on the next
+cycle, whether or not the engine is enabled and without waiting for a tick.
+It is retried every cycle while it stalls; FORCE_PENDING stays 1 until it
+completes. A forced instruction changes PC only if it jumps, and its delay
+field is ignored. Writing INSTR while one is pending replaces it. STALLED
+refers to the program, not to a forced instruction.
+
+**FIFO errors.** The CPU must check the levels before pushing or popping
+(levels go 0–2). A push into a full TX FIFO is dropped and sets TXOVF; a
+pop from an empty RX FIFO returns 0 and sets RXUNF. Both are sticky until
+written 1 to STATUS. A TXF write in a cycle in which the engine pulls a word
+is accepted.
+
+### 6.2 Shared registers
+
+| Offset | Register | Fields |
+|---|---|---|
+| `0x400 + 4i` | `IMEM[i]` | i = 0–63, `[15:0]`. RW; write only while the engines using it are disabled |
+| `0x500` | `EVT` | `[7:0]` event flags, RW |
+| `0x504` | `EVT_SET` | W1S |
+| `0x508` | `EVT_CLR` | W1C |
+| `0x50C` | `IRQ_EN` | `[7:0]` flag n raises IRQ line n; `[11:8]` engine n RX not empty; `[15:12]` engine n TX not full |
+| `0x510` | `ENGINE_CTRL` | `[3:0]` EN of engines 0–3 (RW); `[7:4]` RESTART, `[11:8]` DIV_RESTART (W1). Same as writing every `CTRL` in one cycle |
+| `0x514` | `SAFE_STATE` | W `0x5AFE` in `[15:0]`: disable every engine and set every pad not owned by the system to owner NONE. Other values are ignored |
+| `0x518` | `PAD_OD` | `[7:0]` open drain for pads 8–15 (RW) |
+| `0x51C` | `GPIO_OUT` | `[15:0]` level of pads 8–23 (RW). Writes land on CPU-owned pads only |
+| `0x520` | `GPIO_OE` | `[7:0]` output enable of pads 8–15 (RW). CPU-owned pads only |
+| `0x524` | `PAD_STATE` | R: `[15:0]` level registers of pads 8–23, `[23:16]` OE registers of pads 8–15 |
+| `0x528` / `0x52C` | `GPIO_OUT_SET` / `_CLR` | W1S / W1C on `GPIO_OUT` |
+| `0x530` / `0x534` | `GPIO_OE_SET` / `_CLR` | W1S / W1C on `GPIO_OE` |
+| `0x538` / `0x53C` | `PAD_OD_SET` / `_CLR` | W1S / W1C on `PAD_OD` |
+| `0x540 + 4(p−8)` | `PAD_OWNER[p]` | p = 8–23, `[2:0]` RW: 0–3 engine, 4 CPU, 5 system, 6–7 none |
+
+**Pads** (section 2.2). Each pad takes level and OE writes only from its
+owner; others are dropped. A pad with owner NONE (or 6) is **released**: it
+drives 0 on `uo_out` and has its output enable off on `uio`, whatever its
+registers hold. Changing the owner does not change the registers, so a
+newly owned pad starts from the values they hold. Setting a pad's open-drain
+bit (when it was clear) presets its level to 1, so the pad starts released
+and never pulls low by surprise.
+
+**Interrupts.** The block drives 12 level-sensitive lines: line n (0–7) is
+flag n AND `IRQ_EN[n]`; line 8+n is (engine n RX not empty AND
+`IRQ_EN[8+n]`) OR (engine n TX not full AND `IRQ_EN[12+n]`). They clear at
+the source (clear the flag, drain or fill the FIFO, or clear the enable).
+On the chip they are Ibex fast interrupts 16–27 (`docs/soc.md`).
+
+**Reset values.** Engines disabled; configuration registers as in
+`EngineConfig()` (`tools/peemu/config.py`); IMEM unchanged (no reset);
+FIFOs empty; event flags, `IRQ_EN`, `PAD_OD`, pad level and OE registers 0;
+every pad owner NONE except those the chip assigns to the system at reset
+(on this chip pad 23, the host bridge's MISO, `docs/soc.md`).
 
 ## 7. Differences from RP2040 PIO
 

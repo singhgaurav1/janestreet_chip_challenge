@@ -34,6 +34,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
+      - name: Regenerate engine program headers and check they match
+        run: |
+          pip install -r tools/requirements.txt
+          (cd tools && python -m peemu asm ../examples/pe/uart.pe -f c) \
+            > system_validation/tests/pe_uart/uart_prog.h
+          git diff --exit-code system_validation/tests
       - name: Rebuild system-validation images (fw/ infrastructure) and check they match
         run: |
           make -C system_validation
