@@ -51,6 +51,9 @@ class Case:
     pew: list | None = None         # exact PE-block write sequence (+pe_stub)
     pins: tuple | None = None       # chip: expected (uo_out[6:0], uio_oe) at the end
     log: list = field(default_factory=list)  # regexes that must appear in the log
+    # chip: registers read over the host bridge at the end, {addr: value or
+    # set of allowed values}; at most two contiguous runs of addresses
+    regs: dict = field(default_factory=dict)
 
 
 # HAL on the core (apps/halpanic): init, load, configure, hand pads to engine 1,
@@ -73,6 +76,28 @@ HALPANIC_PEW = (
     # fw_panic -> pe_safe_state: SAFE_STATE key, then IRQ_EN off
     + [(SH + 0x114, 0x5AFE), (SH + 0x10C, 0)]
 )
+
+
+def reg_runs(addrs) -> list[tuple[int, int]]:
+    """(base, words) runs covering the addresses, gaps not read."""
+    runs = []
+    for a in sorted(addrs):
+        if runs and a == runs[-1][0] + 4 * runs[-1][1]:
+            runs[-1] = (runs[-1][0], runs[-1][1] + 1)
+        else:
+            runs.append((a, 1))
+    if len(runs) > 2:
+        raise ValueError(f"regs need {len(runs)} runs, the bench reads 2")
+    return runs
+
+
+# pehal-pads ends in a panic with engine 1 running and pads 8, 9 and 16 owned
+# by the CPU (9 open drain, pulling low). After the safe state: engines off,
+# those pads released (NONE = 6 or 7, pe_isa.md 6.2), the others still system.
+ENGINE_CTRL, PAD_OWNER = SH + 0x110, SH + 0x140
+PEHAL_PADS_REGS = {ENGINE_CTRL: 0,
+                   **{PAD_OWNER + 4 * (p - 8): ({6, 7} if p in (8, 9, 16) else 5)
+                      for p in range(8, 24)}}
 
 
 def cases(target: str) -> list[Case]:
@@ -125,6 +150,11 @@ def chip_cases() -> list[Case]:
         # (docs/soc.md "Bus errors"; nothing aliases).
         Case("beyond_ram", "crashtest-beyondram", p(EXC),
              dict(state=PANIC, reason=EXC, mcause=5, mtval=4096 + 0x84)),
+        # PE HAL on the real PE block (pe_isa.md 6, docs/soc.md)
+        Case("pehal_fifo", "pehal-fifo", 0, dict(state=EXITED, reason=0)),
+        Case("pehal_engines", "pehal-engines", 0, dict(state=EXITED, reason=0)),
+        Case("pehal_pads", "pehal-pads", p(16 + 1), dict(state=PANIC, reason=17, detail=0x5AFE),
+             pins=released, regs=PEHAL_PADS_REGS),
     ]
 
 
@@ -195,6 +225,8 @@ def run(case: Case, args, tmp: Path) -> tuple[bool, str]:
     cmd = [str(TBS[args.tb])] + case.plusargs + [
         f"+img={img}", f"+img_len={img_len}", f"+ram_size={args.ram}", f"+ram={args.ram}",
         f"+dump={status_addr:x}",
+        *[f"+dump{i + 2}={b:x} +dump{i + 2}_n={n}".split()[j]
+          for i, (b, n) in enumerate(reg_runs(case.regs)) for j in (0, 1)],
         "+max_cycles=1000000", "+verilator+rand+reset+2", f"+verilator+seed+{args.seed}"]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     log = p.stdout + p.stderr
@@ -222,6 +254,14 @@ def run(case: Case, args, tmp: Path) -> tuple[bool, str]:
         got = (int(m.group(1), 16) & 0x7F, int(m.group(2), 16)) if m else None
         if got != case.pins:
             errs.append(f"pins (uo_out[6:0], uio_oe) = {got}, expected {case.pins}")
+    regs = {int(a, 16): int(v, 16) for a, v in
+            re.findall(r"REG (0x[0-9a-f]+) (0x[0-9a-f]+)", log)}
+    for a, want in case.regs.items():
+        ok = want if isinstance(want, set) else {want}
+        got = regs.get(a)
+        if got not in ok:
+            errs.append(f"reg 0x{a:08x} = {'missing' if got is None else hex(got)}, "
+                        f"expected {' or '.join(hex(x) for x in sorted(ok))}")
     for pat in case.log:
         if not re.search(pat, log):
             errs.append(f"log has no line matching {pat!r}")

@@ -29,9 +29,13 @@ behavioural model. The loader model does what the RP2350 must:
 3. Clear `SCRATCH`, set `CTRL.run`.
 4. Poll `SCRATCH` while the CPU runs.
 
-It then reads the firmware status block back over SPI and reports the pins.
-Scenario plusargs: truncated load, restart without reload, reload and rerun,
-slower SCK. GPIO is wired back as documented at the top of the file.
+It then reads the firmware status block back over SPI and reports the pins,
+plus up to two register ranges (`+dump2`/`+dump3` with word counts, e.g.
+PE `ENGINE_CTRL` and `PAD_OWNER` after a panic); a bridge error during
+those reads fails the run. Scenario plusargs: truncated load, restart
+(refused, with a one-word poke), reload and rerun, slower SCK, bridge frame
+tests while the CPU runs. GPIO is wired back as documented at the top of
+the file.
 
 ## Simulation rules learned the hard way
 

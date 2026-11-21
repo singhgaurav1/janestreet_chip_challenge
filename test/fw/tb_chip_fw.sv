@@ -29,6 +29,8 @@
 //   +poll=<n>           cycles between SCRATCH polls (default 2000)
 //   +max_cycles=<n>     timeout (default 3,000,000)
 //   +dump=<addr>        at the end, read 16 words from addr (hex) over SPI
+//   +dump2=<addr> +dump2_n=<n>, +dump3=<addr> +dump3_n=<n>
+//                       then n words from each (hex address), printed as REG lines
 //   +bridge_tests       while the CPU runs (fw/apps/bridgetest): peek the
 //                       status-block heartbeat twice, send junk frames, check
 //                       the ID, record unspecified cases (aborted and
@@ -65,6 +67,7 @@ module tb_chip_fw;
   string img;
   int img_len = -1, load_len = -1, restart_at = -1, sck_half = 3, poll = 2000;
   int max_cycles = 3000000, dump_addr = -1, ram = 4096;
+  int dump2 = -1, dump2_n = 1, dump3 = -1, dump3_n = 1;
   bit no_verify = 0, rerun = 0, bridge_tests = 0, bridge_done = 0, restart_poke = 0;
   logic [7:0] image [0:65535];
   longint cycles = 0;
@@ -279,6 +282,10 @@ module tb_chip_fw;
     void'($value$plusargs("poll=%d", poll));
     void'($value$plusargs("max_cycles=%d", max_cycles));
     void'($value$plusargs("dump=%h", dump_addr));
+    void'($value$plusargs("dump2=%h", dump2));
+    void'($value$plusargs("dump2_n=%d", dump2_n));
+    void'($value$plusargs("dump3=%h", dump3));
+    void'($value$plusargs("dump3_n=%d", dump3_n));
     no_verify = $test$plusargs("no_verify");
     rerun = $test$plusargs("rerun");
     restart_poke = $test$plusargs("restart_poke");
@@ -316,6 +323,16 @@ module tb_chip_fw;
       cmd_read(32'(dump_addr), 16, d);
       foreach (d[i]) $display("MEM 0x%08x 0x%08x", dump_addr + 4 * i, d[i]);
     end
+    if (dump2 >= 0) begin
+      cmd_read(32'(dump2), dump2_n, d);
+      foreach (d[i]) $display("REG 0x%08x 0x%08x", dump2 + 4 * i, d[i]);
+    end
+    if (dump3 >= 0) begin
+      cmd_read(32'(dump3), dump3_n, d);
+      foreach (d[i]) $display("REG 0x%08x 0x%08x", dump3 + 4 * i, d[i]);
+    end
+    cmd_status(st);
+    if (st[3:2] != 0) fail(-14, $sformatf("bridge error status 0x%02x after dumps", st));
     if (!finished) report(result);
     $finish;
   end

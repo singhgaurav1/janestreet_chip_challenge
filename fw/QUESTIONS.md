@@ -8,21 +8,33 @@ specs leave a decision open, or where firmware results bear on the
 architecture. Firmware works around each one today (marked **Now**), but
 several are hardware behaviours that cannot be patched after tapeout.
 
-## Status (2026-11-19, after the owner's decisions and the RTL chat's review)
+## Status (2026-11-21, after PR #5: register map v1, bus errors, boot guard)
 
 | Item | Status |
 |---|---|
 | A1 SRAM size | **Resolved:** 4 KiB (PR #3) |
-| A2 bus errors | **Resolved** in `docs/soc.md`, verified on the chip |
-| A3 PE interrupts | RTL planned: event flag n → ID 16+n, per-engine FIFO IRQ → IDs 24–27 (`platform.h` already assumes 16+n) |
-| A4 FIFO edge cases | RTL planned: sticky TXF-overflow / RXF-underflow bits; HAL keeps checking levels |
-| A5 shared-block offsets, owner NONE | RTL planned |
-| A6 reset values, A7 CTRL/RESTART, A8 forced instruction | Spec text pending |
-| A9 engine ENABLE mask, A10 one-write safe state | RTL planned; HAL will use both when specified |
-| A11a reload before run | RTL planned: bridge refuses a run without a load since the last run |
-| A13 bus error above SRAM, A14 unused sysctrl offsets | RTL planned; `beyond_ram` test flips to a fault when A13 lands |
+| A2 bus errors, A13 above SRAM, A14 unused sysctrl offsets | **Resolved** in `docs/soc.md`; chip tests `loadfault`, `fetchfault`, `beyond_ram` |
+| A3 PE interrupts | **Resolved:** flag n → ID 16+n, engine FIFO IRQs → 24–27; HAL and host tests |
+| A4 FIFO edge cases | **Resolved:** sticky TXOVF/RXUNF; chip test `pehal_fifo` (raw overflow, underflow, clear) |
+| A5 shared offsets, owner NONE | **Resolved:** `pe_isa.md` 6.2; chip test `pehal_pads` |
+| A6 reset values | **Resolved**, but the two specs disagree on pad owners: see A17 |
+| A7 CTRL/RESTART, A8 forced instruction | **Resolved:** FORCE_PENDING; chip test `pehal_fifo` (forced blocking push stays pending until a pop) |
+| A9 ENGINE_CTRL, A10 SAFE_STATE | **Resolved:** HAL uses both; chip tests `pehal_engines` (two engines start in one write) and `pehal_pads` (panic releases pads and stops engines, read back over the bridge) |
+| A11a reload before run | **Resolved:** boot guard; chip tests `restart_refused*`, `restart_*_reload` |
 | A12, A15, A16 | Closed (host heartbeat; `fw/` result convention adopted; shared build infrastructure) |
-| B1–B3 (new) bridge observations | Spec text requested, see section B |
+| B1–B3 bridge frame rules | **Resolved:** `docs/soc.md` "Frame rules"; checked by `bridge_while_running` |
+| **A17 (new) reset pad owner** | Open, docs only, see below |
+
+**A17 Reset pad owner: the specs disagree.** `docs/pe_isa.md` 6.2 "Reset
+values" says every pad owner resets to NONE except pad 23. `docs/soc.md`
+says owner 5 (system) is the reset value for all pads 8–23, and the chip
+does that (`pehal_fifo` check 3 reads all 16). The firmware follows
+`soc.md`. *Please align `pe_isa.md` 6.2* (e.g. "every pad owner resets to
+the chip's choice; on this chip all are system"). Safety note: with every
+pad on the system at reset, `SAFE_STATE` does not release them; the pins
+stay safe only because the runtime also clears the sysctrl outputs
+(`fw_platform_safe_state`). Both steps are needed, and `pin_panic` /
+`pehal_pads` check the pins after a panic.
 
 ## A. Decisions needed (hardware, before RTL freeze)
 

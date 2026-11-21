@@ -59,6 +59,7 @@ Two build targets:
 | `apps/halpanic` | HAL on the real core, then a panic; checks the bus write sequence (tb) |
 | `apps/chiptest` | Chip self-test: sysctrl ID, cycle counter vs `mcycle`, GPIO through the pins, pins released at exit |
 | `apps/bridgetest` | Host bridge while the CPU runs: peek/poke, junk frames, CPU loads under bridge traffic |
+| `apps/pehal` | PE HAL on the chip's real PE block, three images (`-fifo`, `-engines`, `-pads`); engine programs in `progs.pe`, assembled at build time |
 | `tests/host/` | HAL unit tests with a recording MMIO mock |
 | `tests/test_hal_crosscheck.py` | C HAL packing vs the golden model's packing |
 | `tests/run_fw_tests.py` | Runs the apps on the testbench; checks exit codes and the status block |
@@ -151,15 +152,16 @@ Measured, rv32imc, `-Os`:
 
 | Piece | Bytes |
 |---|---|
-| Runtime (vectors, boot checks, panic, IRQ, libc) | ~1,190 image + 128 bss |
-| PE HAL | ~1,750 |
+| Runtime (vectors, boot checks, panic, IRQ, libc), linked | ~820–1,190 image + 128 bss |
+| PE HAL, functions a test links (`--gc-sections`) | ~1,400–1,600 |
 | Status block + panic stack | 192 |
 | Stack | computed per image, typically 80–370 B incl. one interrupt frame |
 
-- **Chip (4 KiB):** runtime plus PE HAL is ~3.1 KB, leaving ~400 B (after
-  bss, status block and a typical stack) for protocol drivers and PE program
-  arrays. That is tight for F4; drivers will need to be lean, and images are
-  per scenario (the chip is reloaded for each use).
+- **Chip (4 KiB):** runtime plus the HAL a test links is ~2.3–2.4 KB,
+  leaving ~1.2 KB (after bss, status block and stack) for drivers, tests
+  and PE program arrays. The HAL test on the chip (`apps/pehal`) did not fit
+  as one image (4.9 KB) and is split in three. Drivers will need to be lean,
+  and images are per scenario (the chip is reloaded for each use).
 - At 2 KiB (before PR #3) the HAL did not fit at all.
 - The stack is checked statically. `scripts/stack_check.py` adds up the
   deepest call path from `_start`, then one interrupt frame plus the deepest
@@ -183,8 +185,8 @@ Measured, rv32imc, `-Os`:
 | Same with 30% random stalls and single-port RAM | Bus robustness (the chip's SRAM is single-port) | 67/67 as expected |
 | `run_fw_tests.py` (16 cases) on conv, ref, ref_micro (rv32ec) | Startup, interrupts, all panic paths, corrupted, truncated and dirty images, HAL write sequence | 16/16 each |
 | riscv-tests on the **full chip**, each loaded over the SPI pins | Boot path + ISA on the real SoC | 63 pass, 2 expected fail, 2 skipped (over 4 KiB) |
-| `run_fw_tests.py --tb chip` (16 cases), 3 power-up seeds | Chip self-test and GPIO through the pins, reload after re-hold, slow SCK, bus errors from the interconnect, restart without reload (`CTRL.run` 0→1), restart during boot, corrupted and truncated loads, pins released after a panic, bridge peek/poke and junk frames while the CPU loads the bus, access past the end of RAM | 16/16 each |
-| `test_pe_hal` | HAL rules, every field position written out by hand from the spec | 585 checks |
+| `run_fw_tests.py --tb chip` (21 cases), 3 power-up seeds | Chip self-test and GPIO through the pins, reload after re-hold, slow SCK, bus errors from the interconnect, boot guard (restart refused without a load, during boot and while running), restart with a stale image, corrupted and truncated loads, pins released after a panic, bridge frame rules while the CPU loads the bus, access past the end of RAM (load fault), and the **PE HAL on the real PE block**: reset values, forced instructions and FORCE_PENDING, FIFO levels and sticky errors, two engines started in one write, program memory busy while running, CPU-owned and open-drain pads through the pins, pad 23 protected, and the safe state (engines and pad owners read back over the bridge) | 21/21 each |
+| `test_pe_hal` | HAL rules on a register-file mock, every field position written out by hand from the spec | 616 checks |
 | `test_hal_crosscheck.py` | 3,000 random configurations and 308 divider rates vs the golden model | identical |
 
 The testbench randomises all uninitialised state and starts from a real
