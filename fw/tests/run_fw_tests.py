@@ -55,23 +55,23 @@ class Case:
 
 # HAL on the core (apps/halpanic): init, load, configure, hand pads to engine 1,
 # start, then panic. Expected writes derived by hand from pe_isa.md section 6
-# and the stub shared-block offsets in fw/include/pe_regs.h.
+# (register map v1).
 PE = 0x10001000  # docs/soc.md
 E1, SH = PE + 0x100, PE + 0x400
 HALPANIC_PEW = (
-    [(PE + 0x100 * n, 0) for n in range(4)]                 # pe_hal_init: engines off
-    + [(SH + 0x10C, 0), (SH + 0x100, 0), (SH + 0x120, 0), (SH + 0x118, 0), (SH + 0x11C, 0)]
+    # pe_hal_init: ENGINE_CTRL, IRQ_EN, EVT, GPIO_OE, PAD_OD, GPIO_OUT all 0
+    [(SH + 0x110, 0), (SH + 0x10C, 0), (SH + 0x100, 0), (SH + 0x120, 0), (SH + 0x118, 0),
+     (SH + 0x11C, 0)]
     + [(SH + 4 * (8 + i), w) for i, w in enumerate([0x9f50, 0xf727, 0x6001, 0x0642])]  # IMEM 8..11
     + [(E1 + 0x04, 0x00411B00),   # CLKDIV: 60 MHz / 921.6 kHz = 65 + 27/256
        (E1 + 0x08, 0x08500060),   # EXECCTRL: uart_tx image + ORIGIN 8
        (E1 + 0x0C, 0x00000003), (E1 + 0x10, 0x00880031),             # PINCTRL: OUT/SIDE base 17
        (E1 + 0x14, 0x0001E140), (E1 + 0x18, 0), (E1 + 0x1C, 0)]
-    + [(SH + 0x140 + 4 * (17 - 8), 1), (SH + 0x140 + 4 * (9 - 8), 1), (SH + 0x118, 0x02)]
-    + [(E1, 0x6), (E1, 0x1)]                                         # restart, then enable
-    # fw_panic -> pe_safe_state, in this order:
-    + [(PE + 0x100 * n, 0) for n in range(4)] + [(SH + 0x10C, 0)]
-    + [(SH + 0x140 + 4 * (9 - 8), 4), (SH + 0x140 + 4 * (17 - 8), 4)]  # owners -> CPU
-    + [(SH + 0x120, 0), (SH + 0x118, 0), (SH + 0x11C, 0)]             # OE off, then OD off, then out
+    + [(SH + 0x140 + 4 * (17 - 8), 1), (SH + 0x140 + 4 * (9 - 8), 1),  # PAD_OWNER 17, 9 -> engine 1
+       (SH + 0x138, 0x02)]                                           # PAD_OD_SET pad 9
+    + [(E1, 0x7)]                                                    # EN|RESTART|DIV_RESTART
+    # fw_panic -> pe_safe_state: SAFE_STATE key, then IRQ_EN off
+    + [(SH + 0x114, 0x5AFE), (SH + 0x10C, 0)]
 )
 
 

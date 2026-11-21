@@ -33,23 +33,29 @@ static int pe_engine_reg(uint32_t addr, uint32_t *pe, uint32_t *off)
     return 1;
 }
 
+/* Reads: STATUS and RXF are scripted per engine; EVT from mock.evt;
+ * ENGINE_CTRL returns its EN field; every other register in the PE window
+ * returns the last value written (enough for the HAL's RW readbacks). */
 uint32_t mmio_read32(uint32_t addr)
 {
-    uint32_t pe, off, v = 0;
-    if (pe_engine_reg(addr, &pe, &off)) {
-        if (off == PE_STATUS_OFF) {
-            v = mock.status[pe];
-            if (mock.stall_reads[pe] && --mock.stall_reads[pe] == 0)
-                mock.status[pe] &= ~(1u << PE_STATUS_STALLED_LSB);
-        } else if (off == PE_RXF_OFF) {
-            v = mock.rx_value[pe];
-            mock.rx_pops[pe]++;
-        }
+    uint32_t pe, off, v;
+    if (addr < FW_PE_BASE || addr >= FW_PE_BASE + 0x1000u) {
+        fprintf(stderr, "mock: read outside the PE block 0x%08x\n", addr);
+        abort();
+    }
+    if (pe_engine_reg(addr, &pe, &off) && off == PE_STATUS_OFF) {
+        v = mock.status[pe];
+        if (mock.stall_reads[pe] && --mock.stall_reads[pe] == 0)
+            mock.status[pe] &= ~(1u << PE_STATUS_FORCE_PENDING_LSB);
+    } else if (pe_engine_reg(addr, &pe, &off) && off == PE_RXF_OFF) {
+        v = mock.rx_value[pe];
+        mock.rx_pops[pe]++;
     } else if (addr == PE_SHARED_BASE + PE_SH_EVT_OFF) {
         v = mock.evt;
+    } else if (addr == PE_SHARED_BASE + PE_SH_ENGINE_CTRL_OFF) {
+        v = mock.regs[(addr - FW_PE_BASE) / 4] & 0xFu;
     } else {
-        fprintf(stderr, "mock: unexpected read 0x%08x\n", addr);
-        abort();
+        v = mock.regs[(addr - FW_PE_BASE) / 4];
     }
     log_op('R', addr, v);
     return v;
@@ -60,6 +66,13 @@ void mmio_write32(uint32_t addr, uint32_t value)
     if (addr < FW_PE_BASE || addr >= FW_PE_BASE + 0x1000u) {
         fprintf(stderr, "mock: write outside the PE block 0x%08x\n", addr);
         abort();
+    }
+    mock.regs[(addr - FW_PE_BASE) / 4] = value;
+    uint32_t pe, off;
+    /* per-engine CTRL.EN mirrors into ENGINE_CTRL[pe] */
+    if (pe_engine_reg(addr, &pe, &off) && off == PE_CTRL_OFF) {
+        uint32_t *ec = &mock.regs[(PE_SHARED_BASE + PE_SH_ENGINE_CTRL_OFF - FW_PE_BASE) / 4];
+        *ec = (*ec & ~(1u << pe)) | ((value & 1u) << pe);
     }
     log_op('W', addr, value);
 }
@@ -74,6 +87,19 @@ int irq_enable(uint32_t id)
 {
     mock.mie |= 1u << id;
     return 0;
+}
+
+/* Critical sections: count them so tests can check balance. */
+uint32_t irq_save(void)
+{
+    mock.irq_depth++;
+    return 1u;
+}
+
+void irq_restore(uint32_t saved)
+{
+    (void)saved;
+    mock.irq_depth--;
 }
 
 int irq_disable(uint32_t id)

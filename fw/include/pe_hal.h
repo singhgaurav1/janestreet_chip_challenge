@@ -1,5 +1,6 @@
 /*
- * Protocol Engine HAL. Written from docs/pe_isa.md only (never from RTL).
+ * Protocol Engine HAL. Written from docs/pe_isa.md (register map v1) only,
+ * never from RTL.
  *
  * Model:
  *   - A program is loaded into the shared 64-word instruction memory at an
@@ -104,16 +105,24 @@ int pe_cfg_set_tick_hz(pe_cfg_t *cfg, uint32_t sys_hz, uint32_t tick_hz);
 /* ---- Program memory and engine control ---- */
 /* Write len words at origin..origin+len-1 (no wrap). Fails with PE_EBUSY if
  * an enabled engine's window [ORIGIN, ORIGIN+31] (mod 64) overlaps it: the
- * spec allows writes only while the engines using a word are disabled. */
+ * spec allows writes only while the engines using a word are disabled.
+ * (Which engines are enabled is read from ENGINE_CTRL; ORIGIN comes from the
+ * last pe_configure.) */
 int pe_load_program(uint32_t origin, const uint16_t *code, uint32_t len);
 /* Write the configuration. The engine must be disabled. */
 int pe_configure(uint32_t pe, const pe_cfg_t *cfg);
-/* Restart (PC, counters, divider), then enable. */
+/* Enable with RESTART and DIV_RESTART in the same write: the program starts
+ * at instruction 0 with the first tick on the next cycle (pe_isa.md 6.1). */
 int pe_start(uint32_t pe);
 int pe_stop(uint32_t pe);
-/* Bitmask of engines the HAL has enabled. */
+/* Start (or stop) every engine in mask in the same cycle (ENGINE_CTRL).
+ * Engines outside mask keep running or stay stopped. */
+int pe_start_mask(uint32_t mask);
+int pe_stop_mask(uint32_t mask);
+/* Bitmask of enabled engines (ENGINE_CTRL). */
 uint32_t pe_enabled_mask(void);
-/* Force-execute one instruction; waits until it no longer stalls. */
+/* Force-execute one instruction, then wait until it has completed
+ * (STATUS.FORCE_PENDING clear). Works whether or not the engine runs. */
 int pe_exec(uint32_t pe, uint16_t instr, uint32_t timeout_cycles);
 
 /* ---- FIFOs ---- */
@@ -124,8 +133,12 @@ int pe_tx_try(uint32_t pe, uint32_t word);
 int pe_rx_try(uint32_t pe, uint32_t *word);
 int pe_tx_put(uint32_t pe, uint32_t word, uint32_t timeout_cycles);
 int pe_rx_get(uint32_t pe, uint32_t *word, uint32_t timeout_cycles);
-/* Clear the sticky SERR and OVF flags (W1C). */
+/* Clear the sticky SERR, OVF, TXOVF and RXUNF flags (W1C). */
 int pe_clear_errors(uint32_t pe);
+/* Engine n FIFO interrupt (ID 24 + n): RX not empty and/or TX not full.
+ * Also unmasks the Ibex ID when either is on. Level-sensitive: the handler
+ * must drain/fill the FIFO or disable the source before returning. */
+int pe_fifo_irq_set(uint32_t pe, uint32_t rx_not_empty, uint32_t tx_not_full);
 
 /* ---- Event flags ---- */
 uint32_t pe_evt_read(void);
@@ -137,29 +150,31 @@ void pe_evt_clear(uint32_t mask);
 int pe_evt_irq_enable(uint32_t mask);
 int pe_evt_irq_disable(uint32_t mask);
 
-/* ---- Pads (indices 8..23, pe_isa.md 2.1) ---- */
-/* owner: PE_OWNER_PE(0..3), PE_OWNER_CPU or PE_OWNER_NONE. The system owner
- * (host bridge) is not assignable from firmware. */
+/* ---- Pads (indices 8..23, pe_isa.md 2.2 and 6.2) ----
+ * owner: PE_OWNER_PE(0..3), PE_OWNER_CPU, PE_OWNER_SYSTEM or PE_OWNER_NONE.
+ * Pad 23 is the host bridge's MISO and must stay with the system
+ * (docs/soc.md): any other owner for it is refused. Level, OE and OD use the
+ * SET/CLR aliases, so no read-modify-write and no shadow copies.
+ * Setting OD on a pad presets its level to 1 (released). */
 int pe_pad_set_owner(uint32_t pad, uint32_t owner);
+uint32_t pe_pad_owner(uint32_t pad);                   /* 0xFF for a bad pad */
 int pe_pad_set_od(uint32_t pad, uint32_t on);          /* bidir pads 8..15 */
-int pe_gpio_write(uint32_t pad, uint32_t level);       /* pad owned by the CPU */
+int pe_gpio_write(uint32_t pad, uint32_t level);       /* takes effect if CPU-owned */
 int pe_gpio_set_oe(uint32_t pad, uint32_t on);         /* bidir pads 8..15 */
+uint32_t pe_pad_state(void);                           /* PAD_STATE */
 
 /* ---- Initialisation ----
  * Call once after boot, before anything else here: disables all engines,
- * PE interrupts and event flags, and sets the CPU's own GPIO/OD registers to
- * a known state (all released). Pad owners are left as they are (the host
- * bridge may own some); the HAL only ever changes owners it is asked to. */
+ * PE interrupts and event flags, and clears the CPU GPIO level/OE and
+ * open-drain registers. Pad owners are left as they are (system at reset). */
 void pe_hal_init(void);
 
-/* ---- Safety ---- */
-/* Engines off, PE interrupts off, and every pad the firmware has assigned
- * taken back by the CPU and released (OE off, OD off; uo_out pads driven to
- * FW_SAFE_UO_LEVEL). Called by fw_panic()/fw_exit() through fw_safe_state(). */
+/* ---- Safety ----
+ * One write to SAFE_STATE: every engine disabled and every pad not owned by
+ * the system released (owner NONE: uo_out drives 0, uio OE off). Then PE
+ * interrupts off. Called by fw_panic()/fw_exit() through fw_safe_state(),
+ * which also releases the sysctrl pins. Plain writes only: safe to call with
+ * corrupt RAM and before pe_hal_init(). */
 void pe_safe_state(void);
-
-#ifndef FW_SAFE_UO_LEVEL
-#define FW_SAFE_UO_LEVEL 0u
-#endif
 
 #endif /* FW_PE_HAL_H */

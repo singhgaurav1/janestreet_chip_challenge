@@ -20,7 +20,9 @@ typedef struct {
     uint32_t rx_value[4];
     uint32_t rx_pops[4];
     uint32_t evt;
+    uint32_t regs[0x1000 / 4];  /* last value written per PE-block word (RW readback) */
     uint32_t mie;              /* Ibex interrupt enables set by the HAL */
+    int irq_depth;             /* irq_save() minus irq_restore() */
     uint64_t cycles, cycle_step;
 } mock_t;
 

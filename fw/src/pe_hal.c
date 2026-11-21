@@ -196,41 +196,24 @@ int pe_cfg_set_tick_hz(pe_cfg_t *cfg, uint32_t sys_hz, uint32_t tick_hz)
 }
 
 /* ------------------------------------------------------------- state */
-/* Owner shadow holds owner + 1; 0 = never set by the HAL (also the value
- * after .bss is zeroed, so a panic before pe_hal_init() takes no pads). */
-#define OWNER_UNKNOWN 0u
-
-static struct {
-    uint8_t enabled;                          /* engine bitmask */
-    uint8_t origin[PE_NUM_ENGINES];
-    uint8_t irq_en;
-    uint8_t pad_od;                           /* pads 8..15 */
-    uint8_t gpio_oe;                          /* pads 8..15 */
-    uint16_t gpio_out;                        /* pads 8..23 */
-    uint8_t owner[PE_PAD_LAST_DRIVEABLE - PE_PAD_FIRST_DRIVEABLE + 1];  /* owner + 1 */
-} st;
+/* The only shadow: each engine's ORIGIN from its last pe_configure(), for
+ * the program-memory overlap check. Everything else is read back from the
+ * hardware (ENGINE_CTRL, IRQ_EN, PAD_OWNER are readable; pe_isa.md 6.2). */
+static uint8_t origin[PE_NUM_ENGINES];
 
 static uint32_t ebase(uint32_t pe) { return PE_ENGINE_BASE(pe); }
 static uint32_t sh(uint32_t off) { return PE_SHARED_BASE + off; }
 
 void pe_hal_init(void)
 {
-    for (uint32_t pe = 0; pe < PE_NUM_ENGINES; pe++)
-        mmio_write32(ebase(pe) + PE_CTRL_OFF, 0);
+    mmio_write32(sh(PE_SH_ENGINE_CTRL_OFF), 0);
     mmio_write32(sh(PE_SH_IRQ_EN_OFF), 0);
     mmio_write32(sh(PE_SH_EVT_OFF), 0);
     mmio_write32(sh(PE_SH_GPIO_OE_OFF), 0);
     mmio_write32(sh(PE_SH_PAD_OD_OFF), 0);
     mmio_write32(sh(PE_SH_GPIO_OUT_OFF), 0);
-    st.enabled = 0;
-    st.irq_en = 0;
-    st.pad_od = 0;
-    st.gpio_oe = 0;
-    st.gpio_out = 0;
     for (uint32_t i = 0; i < PE_NUM_ENGINES; i++)
-        st.origin[i] = 0;
-    for (uint32_t i = 0; i < sizeof st.owner; i++)
-        st.owner[i] = OWNER_UNKNOWN;
+        origin[i] = 0;
 }
 
 /* ------------------------------------------------------------- engines */
@@ -243,15 +226,21 @@ static int window_overlaps(uint32_t origin_e, uint32_t lo, uint32_t len)
     return 0;
 }
 
-int pe_load_program(uint32_t origin, const uint16_t *code, uint32_t len)
+uint32_t pe_enabled_mask(void)
 {
-    if (!code || len == 0 || origin >= PE_IMEM_WORDS || len > PE_IMEM_WORDS - origin)
+    return mmio_read32(sh(PE_SH_ENGINE_CTRL_OFF)) & ((1u << PE_NUM_ENGINES) - 1u);
+}
+
+int pe_load_program(uint32_t org, const uint16_t *code, uint32_t len)
+{
+    if (!code || len == 0 || org >= PE_IMEM_WORDS || len > PE_IMEM_WORDS - org)
         return PE_EINVAL;
+    uint32_t en = pe_enabled_mask();
     for (uint32_t pe = 0; pe < PE_NUM_ENGINES; pe++)
-        if ((st.enabled >> pe & 1u) && window_overlaps(st.origin[pe], origin, len))
+        if ((en >> pe & 1u) && window_overlaps(origin[pe], org, len))
             return PE_EBUSY;
     for (uint32_t i = 0; i < len; i++)
-        mmio_write32(sh(PE_SH_IMEM_OFF) + 4u * (origin + i), code[i]);
+        mmio_write32(sh(PE_SH_IMEM_OFF) + 4u * (org + i), code[i]);
     return PE_OK;
 }
 
@@ -259,7 +248,7 @@ int pe_configure(uint32_t pe, const pe_cfg_t *cfg)
 {
     if (pe >= PE_NUM_ENGINES || pe_cfg_check(cfg) != PE_OK)
         return PE_EINVAL;
-    if (st.enabled >> pe & 1u)
+    if (pe_enabled_mask() >> pe & 1u)
         return PE_EBUSY;
     uint32_t b = ebase(pe);
     mmio_write32(b + PE_CLKDIV_OFF, cfg->clkdiv);
@@ -269,7 +258,7 @@ int pe_configure(uint32_t pe, const pe_cfg_t *cfg)
     mmio_write32(b + PE_ASSIST_OFF, cfg->assist);
     mmio_write32(b + PE_CRC_POLY_OFF, cfg->crc_poly);
     mmio_write32(b + PE_TIMING_OFF, cfg->timing);
-    st.origin[pe] = (uint8_t)pe_cfg_get(cfg, PE_F_ORIGIN);
+    origin[pe] = (uint8_t)pe_cfg_get(cfg, PE_F_ORIGIN);
     return PE_OK;
 }
 
@@ -277,12 +266,8 @@ int pe_start(uint32_t pe)
 {
     if (pe >= PE_NUM_ENGINES)
         return PE_EINVAL;
-    uint32_t b = ebase(pe) + PE_CTRL_OFF;
-    /* Restart while still disabled, then enable: two writes, so the result
-     * does not depend on how RTL orders EN against RESTART in one write. */
-    mmio_write32(b, (1u << PE_CTRL_RESTART_LSB) | (1u << PE_CTRL_DIV_RESTART_LSB));
-    mmio_write32(b, 1u << PE_CTRL_EN_LSB);
-    st.enabled = (uint8_t)(st.enabled | (1u << pe));
+    mmio_write32(ebase(pe) + PE_CTRL_OFF, (1u << PE_CTRL_EN_LSB) | (1u << PE_CTRL_RESTART_LSB) |
+                                              (1u << PE_CTRL_DIV_RESTART_LSB));
     return PE_OK;
 }
 
@@ -291,11 +276,33 @@ int pe_stop(uint32_t pe)
     if (pe >= PE_NUM_ENGINES)
         return PE_EINVAL;
     mmio_write32(ebase(pe) + PE_CTRL_OFF, 0);
-    st.enabled = (uint8_t)(st.enabled & ~(1u << pe));
     return PE_OK;
 }
 
-uint32_t pe_enabled_mask(void) { return st.enabled; }
+#define ENGINE_MASK ((1u << PE_NUM_ENGINES) - 1u)
+
+int pe_start_mask(uint32_t mask)
+{
+    if (mask == 0 || (mask & ~ENGINE_MASK))
+        return PE_EINVAL;
+    uint32_t s = irq_save();
+    uint32_t en = pe_enabled_mask() | mask;
+    mmio_write32(sh(PE_SH_ENGINE_CTRL_OFF), en << PE_ENGINE_CTRL_EN_LSB |
+                                                mask << PE_ENGINE_CTRL_RESTART_LSB |
+                                                mask << PE_ENGINE_CTRL_DIVRST_LSB);
+    irq_restore(s);
+    return PE_OK;
+}
+
+int pe_stop_mask(uint32_t mask)
+{
+    if (mask & ~ENGINE_MASK)
+        return PE_EINVAL;
+    uint32_t s = irq_save();
+    mmio_write32(sh(PE_SH_ENGINE_CTRL_OFF), (pe_enabled_mask() & ~mask) << PE_ENGINE_CTRL_EN_LSB);
+    irq_restore(s);
+    return PE_OK;
+}
 
 uint32_t pe_status(uint32_t pe)
 {
@@ -308,7 +315,7 @@ int pe_exec(uint32_t pe, uint16_t instr, uint32_t timeout_cycles)
         return PE_EINVAL;
     mmio_write32(ebase(pe) + PE_INSTR_OFF, instr);
     uint32_t t0 = fw_cycles32();
-    while (pe_status(pe) & (1u << PE_STATUS_STALLED_LSB))
+    while (pe_status(pe) & (1u << PE_STATUS_FORCE_PENDING_LSB))
         if (timeout_cycles != PE_WAIT_FOREVER && fw_elapsed(t0, timeout_cycles))
             return PE_ETIMEDOUT;
     return PE_OK;
@@ -363,7 +370,31 @@ int pe_clear_errors(uint32_t pe)
 {
     if (pe >= PE_NUM_ENGINES)
         return PE_EINVAL;
-    mmio_write32(ebase(pe) + PE_STATUS_OFF, (1u << PE_STATUS_SERR_LSB) | (1u << PE_STATUS_OVF_LSB));
+    mmio_write32(ebase(pe) + PE_STATUS_OFF, PE_STATUS_W1C_MASK);
+    return PE_OK;
+}
+
+/* ------------------------------------------------------------- interrupts */
+/* IRQ_EN is shared by all users: read-modify-write with interrupts off. */
+static void irq_en_update(uint32_t set, uint32_t clr)
+{
+    uint32_t s = irq_save();
+    uint32_t v = mmio_read32(sh(PE_SH_IRQ_EN_OFF));
+    mmio_write32(sh(PE_SH_IRQ_EN_OFF), (v & ~clr) | set);
+    irq_restore(s);
+}
+
+int pe_fifo_irq_set(uint32_t pe, uint32_t rx_not_empty, uint32_t tx_not_full)
+{
+    if (pe >= PE_NUM_ENGINES || rx_not_empty > 1u || tx_not_full > 1u)
+        return PE_EINVAL;
+    uint32_t rx = 1u << (PE_IRQ_EN_RXNE_LSB + pe), tx = 1u << (PE_IRQ_EN_TXNF_LSB + pe);
+    irq_en_update((rx_not_empty ? rx : 0u) | (tx_not_full ? tx : 0u),
+                  (rx_not_empty ? 0u : rx) | (tx_not_full ? 0u : tx));
+    if (rx_not_empty || tx_not_full)
+        (void)irq_enable(FW_IRQ_ID_PE_FIFO(pe));
+    else
+        (void)irq_disable(FW_IRQ_ID_PE_FIFO(pe));
     return PE_OK;
 }
 
@@ -376,8 +407,7 @@ int pe_evt_irq_enable(uint32_t mask)
 {
     if (mask & ~0xFFu)
         return PE_EINVAL;
-    st.irq_en = (uint8_t)(st.irq_en | mask);
-    mmio_write32(sh(PE_SH_IRQ_EN_OFF), st.irq_en);
+    irq_en_update(mask << PE_IRQ_EN_EVT_LSB, 0);
     for (uint32_t n = 0; n < 8; n++)
         if (mask >> n & 1u)
             (void)irq_enable(FW_IRQ_ID_PE_EVT(n));
@@ -391,31 +421,35 @@ int pe_evt_irq_disable(uint32_t mask)
     for (uint32_t n = 0; n < 8; n++)
         if (mask >> n & 1u)
             (void)irq_disable(FW_IRQ_ID_PE_EVT(n));
-    st.irq_en = (uint8_t)(st.irq_en & ~mask);
-    mmio_write32(sh(PE_SH_IRQ_EN_OFF), st.irq_en);
+    irq_en_update(0, mask << PE_IRQ_EN_EVT_LSB);
     return PE_OK;
 }
 
 /* ------------------------------------------------------------- pads */
 static int driveable(uint32_t pad) { return pad >= PE_PAD_FIRST_DRIVEABLE && pad <= PE_PAD_LAST_DRIVEABLE; }
 static int bidir(uint32_t pad) { return pad >= PE_PAD_FIRST_DRIVEABLE && pad <= PE_PAD_LAST_BIDIR; }
+static uint32_t pad_bit(uint32_t pad) { return 1u << (pad - PE_PAD_FIRST_DRIVEABLE); }
 
 int pe_pad_set_owner(uint32_t pad, uint32_t owner)
 {
-    if (!driveable(pad) || !(owner < PE_NUM_ENGINES || owner == PE_OWNER_CPU || owner == PE_OWNER_NONE))
+    if (!driveable(pad) || owner > PE_OWNER_NONE || owner == 6u)
         return PE_EINVAL;
+    if (pad == PE_PAD_HOST_MISO && owner != PE_OWNER_SYSTEM)
+        return PE_EINVAL;   /* would disconnect the host bridge */
     mmio_write32(sh(PE_SH_PAD_OWNER_OFF(pad)), owner);
-    st.owner[pad - PE_PAD_FIRST_DRIVEABLE] = (uint8_t)(owner + 1u);
     return PE_OK;
+}
+
+uint32_t pe_pad_owner(uint32_t pad)
+{
+    return driveable(pad) ? mmio_read32(sh(PE_SH_PAD_OWNER_OFF(pad))) & 7u : 0xFFu;
 }
 
 int pe_pad_set_od(uint32_t pad, uint32_t on)
 {
     if (!bidir(pad) || on > 1u)
         return PE_EINVAL;
-    uint32_t bit = 1u << (pad - PE_PAD_FIRST_DRIVEABLE);
-    st.pad_od = (uint8_t)(on ? (st.pad_od | bit) : (st.pad_od & ~bit));
-    mmio_write32(sh(PE_SH_PAD_OD_OFF), st.pad_od);
+    mmio_write32(sh(on ? PE_SH_PAD_OD_SET_OFF : PE_SH_PAD_OD_CLR_OFF), pad_bit(pad));
     return PE_OK;
 }
 
@@ -423,9 +457,7 @@ int pe_gpio_write(uint32_t pad, uint32_t level)
 {
     if (!driveable(pad) || level > 1u)
         return PE_EINVAL;
-    uint32_t bit = 1u << (pad - PE_PAD_FIRST_DRIVEABLE);
-    st.gpio_out = (uint16_t)(level ? (st.gpio_out | bit) : (st.gpio_out & ~bit));
-    mmio_write32(sh(PE_SH_GPIO_OUT_OFF), st.gpio_out);
+    mmio_write32(sh(level ? PE_SH_GPIO_OUT_SET_OFF : PE_SH_GPIO_OUT_CLR_OFF), pad_bit(pad));
     return PE_OK;
 }
 
@@ -433,42 +465,23 @@ int pe_gpio_set_oe(uint32_t pad, uint32_t on)
 {
     if (!bidir(pad) || on > 1u)
         return PE_EINVAL;
-    uint32_t bit = 1u << (pad - PE_PAD_FIRST_DRIVEABLE);
-    st.gpio_oe = (uint8_t)(on ? (st.gpio_oe | bit) : (st.gpio_oe & ~bit));
-    mmio_write32(sh(PE_SH_GPIO_OE_OFF), st.gpio_oe);
+    mmio_write32(sh(on ? PE_SH_GPIO_OE_SET_OFF : PE_SH_GPIO_OE_CLR_OFF), pad_bit(pad));
     return PE_OK;
 }
 
+uint32_t pe_pad_state(void) { return mmio_read32(sh(PE_SH_PAD_STATE_OFF)); }
+
 /* ------------------------------------------------------------- safety */
-/* Order matters (pe_isa.md 2.2-2.3): stop the engines so nothing changes;
- * take each pad the firmware assigned to an engine or the CPU; turn its
- * output enable off while still in open-drain mode (so an OD pad never
- * drives high); then leave open-drain mode (pad now floats); finally set
- * uo_out levels. Plain writes from constants plus the owner shadow; the
- * shadow is validated because RAM may be corrupt when this runs. */
+/* pe_isa.md 6.2 SAFE_STATE: one write disables every engine and releases
+ * every pad the system does not own, in the same cycle. Then interrupts off.
+ * Plain writes of constants: correct even with corrupt RAM. */
 void pe_safe_state(void)
 {
-    for (uint32_t pe = 0; pe < PE_NUM_ENGINES; pe++)
-        mmio_write32(ebase(pe) + PE_CTRL_OFF, 0);
-    st.enabled = 0;
+    mmio_write32(sh(PE_SH_SAFE_STATE_OFF), PE_SAFE_STATE_KEY);
     mmio_write32(sh(PE_SH_IRQ_EN_OFF), 0);
-    st.irq_en = 0;
-    for (uint32_t pad = PE_PAD_FIRST_DRIVEABLE; pad <= PE_PAD_LAST_DRIVEABLE; pad++) {
-        uint32_t o = st.owner[pad - PE_PAD_FIRST_DRIVEABLE];
-        if (o >= 1u && o <= PE_OWNER_CPU + 1u) {  /* an engine or the CPU */
-            mmio_write32(sh(PE_SH_PAD_OWNER_OFF(pad)), PE_OWNER_CPU);
-            st.owner[pad - PE_PAD_FIRST_DRIVEABLE] = (uint8_t)(PE_OWNER_CPU + 1u);
-        }
-    }
-    mmio_write32(sh(PE_SH_GPIO_OE_OFF), 0);
-    st.gpio_oe = 0;
-    mmio_write32(sh(PE_SH_PAD_OD_OFF), 0);
-    st.pad_od = 0;
-    st.gpio_out = FW_SAFE_UO_LEVEL ? 0xFF00u : 0u;
-    mmio_write32(sh(PE_SH_GPIO_OUT_OFF), st.gpio_out);
 }
 
-/* Strong definition of the runtime hook (weak no-op in runtime.c). */
+/* Strong definition of the runtime hook (weak default in runtime.c). */
 void fw_safe_state(void)
 {
     pe_safe_state();
