@@ -67,24 +67,50 @@ APPS    := $(notdir $(wildcard apps/*))
 
 # Per-app extras: apps/<app>/app.mk may set <app>_SRC_EXTRA, <app>_CFLAGS,
 # <app>_HAL (=1 to link the PE HAL) and <app>_VARIANTS (builds <app>-<v>
-# with -DVARIANT=<v>). Every apps/<app>/<name>.pe is assembled with the PE
-# assembler (tools/peemu) into <name>_pe.h on the app's include path.
+# with -DVARIANT=<v>) and <app>_DRIVERS (protocol drivers from
+# drivers/drivers.mk; implies the HAL). Every apps/<app>/<name>.pe, and each
+# driver's engine programs, is assembled with the PE assembler (tools/peemu)
+# into <name>_pe.h on the app's include path.
 PEASM := PYTHONPATH=$(abspath $(CURDIR)/../tools) $(PYTHON) -m peemu asm
+include drivers/drivers.mk
 -include $(wildcard apps/*/app.mk)
+
+app_src = $(RT_SRC) $(if $($(1)_HAL)$($(1)_DRIVERS),$(HAL_SRC)) $(wildcard apps/$(1)/*.c) \
+          $(foreach d,$($(1)_DRIVERS),$(DRV_$(d)_SRC)) $($(1)_SRC_EXTRA)
+app_pe  = $(wildcard apps/$(1)/*.pe) $(foreach d,$($(1)_DRIVERS),$(DRV_$(d)_PE))
+pe_hdr  = $(BUILD)/gen-$(1)/$(basename $(notdir $(2)))_pe.h
+cfg_hdr = $(BUILD)/gen-$(1)/$(basename $(notdir $(2)))_cfg.h
+
+# apps/<app>/<name>.pecfg -> <name>_cfg.h: engine configurations built and
+# checked at build time by the HAL's own code on the host (scripts/pecfg.py)
+define pecfg_rule
+# $(1) image name, $(2) .pecfg file, $(3) app dir, $(4) extra cflags (-DVARIANT=..)
+$(call cfg_hdr,$(1),$(2)): $(2) $(foreach f,$(call app_pe,$(3)),$(call pe_hdr,$(1),$(f))) \
+                           scripts/pecfg.py $(HAL_SRC) tests/host/mock.c include/pe_hal.h include/pe_regs.h
+	@mkdir -p $$(@D)
+	@$$(PYTHON) scripts/pecfg.py $$< -o $$@ --cc $$(HOSTCC) --sys-hz 60000000 $(4) \
+	  --pe-headers $(foreach f,$(call app_pe,$(3)),$(call pe_hdr,$(1),$(f)))
+endef
+
+define pe_rule
+# $(1) image name, $(2) .pe file
+$(call pe_hdr,$(1),$(2)): $(2)
+	@mkdir -p $$(@D)
+	@$$(PEASM) $$< -f c -o $$@
+endef
 
 define app_rules
 # $(1) image name, $(2) app dir, $(3) extra cflags
-$(BUILD)/gen-$(1)/%_pe.h: apps/$(2)/%.pe
-	@mkdir -p $$(@D)
-	@$(PEASM) $$< -f c -o $$@
-$(BUILD)/$(1).elf: $(RT_SRC) $(if $($(2)_HAL),$(HAL_SRC)) $(wildcard apps/$(2)/*.c) $($(2)_SRC_EXTRA) \
-                   $(patsubst apps/$(2)/%.pe,$(BUILD)/gen-$(1)/%_pe.h,$(wildcard apps/$(2)/*.pe)) \
-                   link/fw.ld $(wildcard include/*.h src/*.h) Makefile
+$(foreach f,$(call app_pe,$(2)),$(eval $(call pe_rule,$(1),$(f))))
+$(foreach f,$(wildcard apps/$(2)/*.pecfg),$(eval $(call pecfg_rule,$(1),$(f),$(2),$(3))))
+$(BUILD)/$(1).elf: $(call app_src,$(2)) $(foreach f,$(call app_pe,$(2)),$(call pe_hdr,$(1),$(f))) \
+                   $(foreach f,$(wildcard apps/$(2)/*.pecfg),$(call cfg_hdr,$(1),$(f))) \
+                   link/fw.ld $(wildcard include/*.h src/*.h drivers/*.h) Makefile
 	@mkdir -p $(BUILD)/obj-$(1) $(BUILD)/gen-$(1)
 	@echo "CC  $(1) [$(ARCH), RAM $(RAM_SIZE)]"
 	@cd $(BUILD)/obj-$(1) && $(CC) $(CFLAGS) $($(2)_CFLAGS) $(3) -I$(CURDIR)/include -I$(CURDIR)/src \
-	  -I$(CURDIR)/$(BUILD)/gen-$(1) \
-	  -c $(addprefix $(CURDIR)/,$(RT_SRC) $(if $($(2)_HAL),$(HAL_SRC)) $(wildcard apps/$(2)/*.c) $($(2)_SRC_EXTRA))
+	  -I$(CURDIR)/drivers -I$(CURDIR)/$(BUILD)/gen-$(1) \
+	  -c $(addprefix $(CURDIR)/,$(call app_src,$(2)))
 	@$(CC) $(LDFLAGS) -Wl,-Map=$(BUILD)/$(1).map -o $$@ $(BUILD)/obj-$(1)/*.o $(LIBS)
 $(BUILD)/$(1).hex: $(BUILD)/$(1).elf scripts/mkimage.py
 	@$(PYTHON) scripts/stack_check.py --objdump $(CROSS)objdump --nm $(NM) $$< $(BUILD)/obj-$(1)

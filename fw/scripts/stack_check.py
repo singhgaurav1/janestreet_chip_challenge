@@ -67,7 +67,10 @@ def call_graph(elf: Path, objdump: str, code_syms: set) -> tuple[dict[str, set],
         if m:
             target = m.group(2)
             if target != cur and target in code_syms:
-                graph[cur].add(target)
+                # jal/call keep this frame. In compiled code a jump or branch
+                # into another function is a tail call, made after this frame
+                # is popped. Hand-written assembly gets no such credit.
+                graph[cur].add((target, m.group(1) in ("jal", "call") or cur in ASM_FRAMES))
         elif re.search(r"\sjalr\s", line) and not re.search(r"\sjalr\s+zero", line):
             indirect.add(cur)
         elif re.search(r"\sjr\s+(?!ra\b)", line):
@@ -75,14 +78,27 @@ def call_graph(elf: Path, objdump: str, code_syms: set) -> tuple[dict[str, set],
     return graph, indirect
 
 
+def frame_name(fn: str, sizes) -> str:
+    """GCC names clones 'f.constprop.0' / 'f.isra.0' in the ELF and
+    'f.constprop' in the .su file."""
+    if fn not in sizes:
+        base = re.sub(r"\.\d+$", "", fn)
+        if base in sizes:
+            return base
+    return fn
+
+
 def worst(fn: str, graph, sizes, unknown: set, stack=()) -> int:
     if fn in stack:
         raise RecursionError(" -> ".join(stack + (fn,)))
-    if fn not in sizes and not LEAF_LIBGCC.match(fn) and not fn.startswith("."):
+    if frame_name(fn, sizes) not in sizes and not LEAF_LIBGCC.match(fn) and not fn.startswith("."):
         unknown.add(fn)
-    here = sizes.get(fn, 0)
-    return here + max((worst(c, graph, sizes, unknown, stack + (fn,)) for c in graph.get(fn, ())),
-                      default=0)
+    here = sizes.get(frame_name(fn, sizes), 0)
+    deepest = here
+    for c, is_call in graph.get(fn, ()):
+        w = worst(c, graph, sizes, unknown, stack + (fn,))
+        deepest = max(deepest, here + w if is_call else w)
+    return deepest
 
 
 def main() -> int:

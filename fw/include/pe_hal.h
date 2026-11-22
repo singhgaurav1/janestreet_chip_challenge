@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 
+#include "mmio.h"
 #include "pe_regs.h"
 
 typedef enum {
@@ -111,6 +112,14 @@ int pe_cfg_set_tick_hz(pe_cfg_t *cfg, uint32_t sys_hz, uint32_t tick_hz);
 int pe_load_program(uint32_t origin, const uint16_t *code, uint32_t len);
 /* Write the configuration. The engine must be disabled. */
 int pe_configure(uint32_t pe, const pe_cfg_t *cfg);
+/* Same, without pe_cfg_check(): only for configurations checked at build
+ * time (fw/scripts/pecfg.py runs pe_cfg_check on the host). Lets an image
+ * leave out the run-time field code (~0.8 KB). */
+int pe_configure_prechecked(uint32_t pe, const pe_cfg_t *cfg);
+static inline uint32_t pe_cfg_origin(const pe_cfg_t *cfg)
+{
+    return (cfg->execctrl >> PE_EXECCTRL_ORIGIN_LSB) & ((1u << PE_EXECCTRL_ORIGIN_WIDTH) - 1u);
+}
 /* Enable with RESTART and DIV_RESTART in the same write: the program starts
  * at instruction 0 with the first tick on the next cycle (pe_isa.md 6.1). */
 int pe_start(uint32_t pe);
@@ -125,12 +134,35 @@ uint32_t pe_enabled_mask(void);
  * (STATUS.FORCE_PENDING clear). Works whether or not the engine runs. */
 int pe_exec(uint32_t pe, uint16_t instr, uint32_t timeout_cycles);
 
-/* ---- FIFOs ---- */
-uint32_t pe_status(uint32_t pe);   /* raw STATUS; 0 for an invalid engine */
+/* ---- FIFOs ----
+ * pe_status / pe_tx_try / pe_rx_try are inline: they sit on every data path,
+ * and as calls they cost ~45 cycles each on the chip (measured with
+ * apps/pebench), which lost bytes at 3 Mbaud. Same checks as before. */
 #define PE_STATUS_TXLEVEL(st) (((st) >> PE_STATUS_TXLEVEL_LSB) & 0xFu)
 #define PE_STATUS_RXLEVEL(st) (((st) >> PE_STATUS_RXLEVEL_LSB) & 0xFu)
-int pe_tx_try(uint32_t pe, uint32_t word);
-int pe_rx_try(uint32_t pe, uint32_t *word);
+/* raw STATUS; 0 for an invalid engine */
+static inline uint32_t pe_status(uint32_t pe)
+{
+    return pe < PE_NUM_ENGINES ? mmio_read32(PE_ENGINE_BASE(pe) + PE_STATUS_OFF) : 0u;
+}
+static inline int pe_tx_try(uint32_t pe, uint32_t word)
+{
+    if (pe >= PE_NUM_ENGINES)
+        return PE_EINVAL;
+    if (PE_STATUS_TXLEVEL(pe_status(pe)) >= PE_FIFO_DEPTH)
+        return PE_EAGAIN;   /* never write a full FIFO */
+    mmio_write32(PE_ENGINE_BASE(pe) + PE_TXF_OFF, word);
+    return PE_OK;
+}
+static inline int pe_rx_try(uint32_t pe, uint32_t *word)
+{
+    if (pe >= PE_NUM_ENGINES || !word)
+        return PE_EINVAL;
+    if (PE_STATUS_RXLEVEL(pe_status(pe)) == 0)
+        return PE_EAGAIN;   /* never read an empty FIFO */
+    *word = mmio_read32(PE_ENGINE_BASE(pe) + PE_RXF_OFF);
+    return PE_OK;
+}
 int pe_tx_put(uint32_t pe, uint32_t word, uint32_t timeout_cycles);
 int pe_rx_get(uint32_t pe, uint32_t *word, uint32_t timeout_cycles);
 /* Clear the sticky SERR, OVF, TXOVF and RXUNF flags (W1C). */
