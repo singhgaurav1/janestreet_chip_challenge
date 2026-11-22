@@ -24,6 +24,7 @@ several are hardware behaviours that cannot be patched after tapeout.
 | A12, A15, A16 | Closed (host heartbeat; `fw/` result convention adopted; shared build infrastructure) |
 | B1–B3 bridge frame rules | **Resolved:** `docs/soc.md` "Frame rules"; checked by `bridge_while_running` |
 | **A17 (new) reset pad owner** | Open, docs only, see below |
+| **A18 (new) output pins low until boot** | Open, needs an owner/architecture decision, see below |
 
 **A17 Reset pad owner: the specs disagree.** `docs/pe_isa.md` 6.2 "Reset
 values" says every pad owner resets to NONE except pad 23. `docs/soc.md`
@@ -35,6 +36,21 @@ pad on the system at reset, `SAFE_STATE` does not release them; the pins
 stay safe only because the runtime also clears the sysctrl outputs
 (`fw_platform_safe_state`). Both steps are needed, and `pin_panic` /
 `pehal_pads` check the pins after a panic.
+
+**A18 Output pins are low from reset until the firmware runs.** Every
+`uo_out` pin resets to 0 (sysctrl `GPIO_OUT` = 0, all pads owned by the
+system), and `uo_out` has no output enable. A UART TX on `uo_out` idles
+*high*, so from power-up through the whole image load (~2–7 ms at the
+bridge's SCK) the far end sees a break, and may read a `0x00` byte or a
+framing error. The F4 UART test hit exactly this (the independent UART model
+read a `0x00`) and now attaches only once the firmware drives the line high.
+I2C/open drain on `uio` is not affected (OE off, the external pull-up wins).
+*Options:* (a) document it ("TX on `uo_out` shows a break until boot; put
+UART TX on a `uio` pad with a pull-up, which idles high with OE off"),
+(b) reset sysctrl `GPIO_OUT` to all ones (the `chip`/`pin_panic` tests and
+the safe state assume 0, so the safe state would need the same choice), or
+(c) a reset-value strap. Firmware can only do (a) on its side; I recommend
+(a) now and deciding (b) with the safe-state definition.
 
 ## A. Decisions needed (hardware, before RTL freeze)
 

@@ -1,0 +1,2 @@
+# Build-time checked configurations for apps/pehal (scripts/pecfg.py).
+forced_cfg  forced     # assembler defaults, origin 0

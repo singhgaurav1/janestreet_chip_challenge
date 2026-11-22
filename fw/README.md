@@ -43,9 +43,9 @@ Two build targets:
 
 | Path | What |
 |---|---|
-| `include/platform.h` | Memory map from `docs/soc.md`; PE interrupt wiring is a **STUB** |
+| `include/platform.h` | Memory map and PE interrupt wiring from `docs/soc.md` |
 | `include/sysctrl.h` | sysctrl driver (ID, GPIO, cycle counter, SCRATCH) and its pin safe state |
-| `include/pe_regs.h` | PE registers from `pe_isa.md` section 6. Shared-block offsets are **STUB** |
+| `include/pe_regs.h` | PE registers from `pe_isa.md` section 6 (register map v1) |
 | `include/pe_hal.h`, `src/pe_hal.c` | PE HAL: config images, program load, start/stop, FIFOs, event flags, pads, safe state |
 | `include/fw.h`, `src/runtime.c` | Boot checks, status block, panic, exit, CRC-32 |
 | `include/irq.h`, `src/irq.c` | Interrupt registration and dispatch |
@@ -60,6 +60,11 @@ Two build targets:
 | `apps/chiptest` | Chip self-test: sysctrl ID, cycle counter vs `mcycle`, GPIO through the pins, pins released at exit |
 | `apps/bridgetest` | Host bridge while the CPU runs: peek/poke, junk frames, CPU loads under bridge traffic |
 | `apps/pehal` | PE HAL on the chip's real PE block, three images (`-fifo`, `-engines`, `-pads`); engine programs in `progs.pe`, assembled at build time |
+| `drivers/` | Protocol drivers on the engines (`pe_uart`); `drivers.mk` lists each driver's sources and engine programs (the spec's `examples/pe/*.pe`, assembled at build time) |
+| `scripts/pecfg.py` | Engine configurations from `apps/<app>/*.pecfg`, built and **checked at build time by the HAL's own C code** on the host; emits `const pe_cfg_t` for `pe_configure_prechecked()` |
+| `apps/uart` | F4 UART echo, one image per baud rate (115200, 1M, 3M) |
+| `apps/pebench` | Cycle costs of bus accesses and HAL calls on the chip (read by hand) |
+| `ci_proto.sh` | F4 protocol tests (Icarus + cocotb + third-party protocol models; `test/fw/cocotb/`) |
 | `tests/host/` | HAL unit tests with a recording MMIO mock |
 | `tests/test_hal_crosscheck.py` | C HAL packing vs the golden model's packing |
 | `tests/run_fw_tests.py` | Runs the apps on the testbench; checks exit codes and the status block |
@@ -154,6 +159,8 @@ Measured, rv32imc, `-Os`:
 |---|---|
 | Runtime (vectors, boot checks, panic, IRQ, libc), linked | ~820–1,190 image + 128 bss |
 | PE HAL, functions a test links (`--gc-sections`) | ~1,400–1,600 |
+| ... of which run-time config packing and checking (`pe_cfg_set/get/check`) | ~830, **avoidable**: see `pecfg` below |
+| UART driver | ~250 |
 | Status block + panic stack | 192 |
 | Stack | computed per image, typically 80–370 B incl. one interrupt frame |
 
@@ -162,12 +169,22 @@ Measured, rv32imc, `-Os`:
   and PE program arrays. The HAL test on the chip (`apps/pehal`) did not fit
   as one image (4.9 KB) and is split in three. Drivers will need to be lean,
   and images are per scenario (the chip is reloaded for each use).
+- **Build-time configurations (`pecfg`).** The first UART echo was 4,050 B
+  of code and did not fit. Engine configurations are fixed per image, so
+  `scripts/pecfg.py` builds them at build time with the HAL's own
+  `pe_cfg_set` / `pe_cfg_set_tick_hz` / `pe_cfg_check` compiled for the
+  host: a configuration the HAL would refuse fails the build with the same
+  rules. The image carries only the 28-byte register image (covered by the
+  image CRC) and calls `pe_configure_prechecked()`. UART echo: 2,692 B. The
+  run-time path stays for configurations computed on the chip.
 - At 2 KiB (before PR #3) the HAL did not fit at all.
 - The stack is checked statically. `scripts/stack_check.py` adds up the
   deepest call path from `_start`, then one interrupt frame plus the deepest
   possible handler (interrupts don't nest on Ibex), plus a 32 B margin, and
   checks the panic path against its own 128 B stack. It fails the build on
-  recursion, dynamic frames, or a missing frame size. This replaced a fixed
+  recursion, dynamic frames, or a missing frame size. Compiler tail calls
+  (`j` into another function) do not add the caller's frame; hand-written
+  assembly gets no such credit. This replaced a fixed
   512 B minimum. The measured high-water mark in the status block stays
   below the computed bound (self-test: 132 B used, 368 B bound).
 - `mkimage.py` rejects libgcc's 64-bit divide (about 2.4 KB).
@@ -188,9 +205,23 @@ Measured, rv32imc, `-Os`:
 | `run_fw_tests.py --tb chip` (21 cases), 3 power-up seeds | Chip self-test and GPIO through the pins, reload after re-hold, slow SCK, bus errors from the interconnect, boot guard (restart refused without a load, during boot and while running), restart with a stale image, corrupted and truncated loads, pins released after a panic, bridge frame rules while the CPU loads the bus, access past the end of RAM (load fault), and the **PE HAL on the real PE block**: reset values, forced instructions and FORCE_PENDING, FIFO levels and sticky errors, two engines started in one write, program memory busy while running, CPU-owned and open-drain pads through the pins, pad 23 protected, and the safe state (engines and pad owners read back over the bridge) | 21/21 each |
 | `test_pe_hal` | HAL rules on a register-file mock, every field position written out by hand from the spec | 616 checks |
 | `test_hal_crosscheck.py` | 3,000 random configurations and 308 divider rates vs the golden model | identical |
+| **F4** `ci_proto.sh`: UART echo on the full chip (Icarus), firmware loaded over the SPI pins, line checked by **cocotbext-uart** | Driver + spec example programs + PE block + pins, at 115200, 1 M and 3 Mbaud back-to-back | 3/3 |
 
 The testbench randomises all uninitialised state and starts from a real
 reset edge (see `test/fw/README.md` for why that matters).
+
+## Measured numbers on the chip (`apps/pebench`, cycles at 60 MHz)
+
+| Operation | Cycles |
+|---|---|
+| Instruction (fetch from the single-port SRAM) | ~2 |
+| Load from SRAM, PE or sysctrl register; store to a PE register | ~4 (on top of the instruction) |
+| `pe_status()`, `pe_rx_try()` on an empty FIFO (inline) | 8, 11 (were 19 and 49 as calls) |
+
+At 3 Mbaud a byte arrives every 200 cycles and the RX FIFO is 2 deep. With
+the FIFO calls out of line, the echo loop took ~230 cycles per byte, the
+engine stalled on a full RX FIFO and lost frames (the independent UART model
+caught it). With the inline calls 3 Mbaud passes. Data paths must stay lean.
 
 ## Measured numbers (standalone core, zero wait states)
 

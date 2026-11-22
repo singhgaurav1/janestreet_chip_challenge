@@ -25,6 +25,7 @@
 #include "mmio.h"
 #include "pe_hal.h"
 #include "pe_regs.h"
+#include "pehal_cfg.h"
 #include "progs_pe.h"
 #include "sysctrl.h"
 
@@ -59,9 +60,7 @@ static int check_reset_values(void)
 
 static int check_forced_and_fifos(void)
 {
-    pe_cfg_t c;
-    pe_cfg_init(&c);
-    CHECK(10, pe_configure(0, &c) == PE_OK);
+    CHECK(10, pe_configure_prechecked(0, &forced_cfg) == PE_OK);
     /* forced instructions on a disabled engine (6.1 INSTR) */
     CHECK(11, pe_exec(0, forced_program[0], 1000) == PE_OK);   /* set y, 21 */
     CHECK(12, pe_exec(0, forced_program[1], 1000) == PE_OK);   /* mov isr, y */

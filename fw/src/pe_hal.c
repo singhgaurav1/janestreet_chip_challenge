@@ -248,6 +248,13 @@ int pe_configure(uint32_t pe, const pe_cfg_t *cfg)
 {
     if (pe >= PE_NUM_ENGINES || pe_cfg_check(cfg) != PE_OK)
         return PE_EINVAL;
+    return pe_configure_prechecked(pe, cfg);
+}
+
+int pe_configure_prechecked(uint32_t pe, const pe_cfg_t *cfg)
+{
+    if (pe >= PE_NUM_ENGINES)
+        return PE_EINVAL;
     if (pe_enabled_mask() >> pe & 1u)
         return PE_EBUSY;
     uint32_t b = ebase(pe);
@@ -258,7 +265,7 @@ int pe_configure(uint32_t pe, const pe_cfg_t *cfg)
     mmio_write32(b + PE_ASSIST_OFF, cfg->assist);
     mmio_write32(b + PE_CRC_POLY_OFF, cfg->crc_poly);
     mmio_write32(b + PE_TIMING_OFF, cfg->timing);
-    origin[pe] = (uint8_t)pe_cfg_get(cfg, PE_F_ORIGIN);
+    origin[pe] = (uint8_t)pe_cfg_origin(cfg);
     return PE_OK;
 }
 
@@ -304,10 +311,6 @@ int pe_stop_mask(uint32_t mask)
     return PE_OK;
 }
 
-uint32_t pe_status(uint32_t pe)
-{
-    return pe < PE_NUM_ENGINES ? mmio_read32(ebase(pe) + PE_STATUS_OFF) : 0u;
-}
 
 int pe_exec(uint32_t pe, uint16_t instr, uint32_t timeout_cycles)
 {
@@ -322,26 +325,6 @@ int pe_exec(uint32_t pe, uint16_t instr, uint32_t timeout_cycles)
 }
 
 /* ------------------------------------------------------------- FIFOs */
-int pe_tx_try(uint32_t pe, uint32_t word)
-{
-    if (pe >= PE_NUM_ENGINES)
-        return PE_EINVAL;
-    if (PE_STATUS_TXLEVEL(pe_status(pe)) >= PE_FIFO_DEPTH)
-        return PE_EAGAIN;   /* never write a full FIFO: the spec does not say what happens */
-    mmio_write32(ebase(pe) + PE_TXF_OFF, word);
-    return PE_OK;
-}
-
-int pe_rx_try(uint32_t pe, uint32_t *word)
-{
-    if (pe >= PE_NUM_ENGINES || !word)
-        return PE_EINVAL;
-    if (PE_STATUS_RXLEVEL(pe_status(pe)) == 0)
-        return PE_EAGAIN;   /* never read an empty FIFO: unspecified result */
-    *word = mmio_read32(ebase(pe) + PE_RXF_OFF);
-    return PE_OK;
-}
-
 int pe_tx_put(uint32_t pe, uint32_t word, uint32_t timeout_cycles)
 {
     uint32_t t0 = fw_cycles32();

@@ -37,6 +37,31 @@ those reads fails the run. Scenario plusargs: truncated load, restart
 tests while the CPU runs. GPIO is wired back as documented at the top of
 the file.
 
+## Protocol tests: full chip in Icarus with cocotb (`cocotb/`)
+
+F4 tests: real firmware drives a protocol through the chip's pins and a
+**third-party protocol model** checks the line (`cocotbext-uart`; SPI/I2C
+next). `tb_proto.v` is a plain top with one named signal per pin;
+`host.py` is the RP2350 side (SPI loader/bridge, result polling), written
+from `docs/soc.md`. RTL sources come from `test/Makefile` as for the
+Verilator benches. Run: `fw/ci_proto.sh` (or `make` here). Icarus runs
+~3k cycles/s, so a test takes 1–3 minutes; Verilator 5.020 here is too old
+for cocotb 2.
+
+| Test | Result |
+|---|---|
+| `test_uart`: banner, then 16 bytes echoed back-to-back (incl. 0x00, 0xFF, 0x55, 0xAA) | 115200, 1 M, 3 Mbaud: 3/3 pass (a corrupted echo is caught) |
+
+Notes:
+- `cocotbext-uart` 0.1.4 `UartSink.read(n)` returns once one byte is
+  queued and then fails if fewer than n are there; the test reads one byte
+  at a time.
+- `uo_out` pins are low from reset until the firmware runs, so a UART sink
+  on `uo_out` sees a break during the image load; the test attaches it when
+  the line first goes high (`fw/QUESTIONS.md` A18). The exit safe state
+  drives the line low again, so "no extra bytes" is checked before the exit.
+- cocotb 2 needs an even clock period: 16,666 ps (60.0024 MHz).
+
 ## Simulation rules learned the hard way
 
 - **Real reset edges.** Ibex resets asynchronously behind a gated clock. A

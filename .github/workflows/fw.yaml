@@ -48,3 +48,26 @@ jobs:
             fw/build/*_tb/*.hex
             fw/build/riscv-tests/results.*.txt
             fw/build/tests/**/*.log
+
+  # F4: firmware drives protocols on the full chip, checked by third-party
+  # protocol models (cocotbext-*), in Icarus. Slow, so its own job.
+  fw-proto:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf iverilog
+          pip install -r tools/requirements.txt -r test/fw/cocotb/requirements.txt
+      - name: Firmware protocol tests
+        run: ./fw/ci_proto.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fw-proto-results
+          path: test/fw/cocotb/results.xml
